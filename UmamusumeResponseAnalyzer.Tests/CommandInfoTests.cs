@@ -22,6 +22,7 @@ namespace UmamusumeResponseAnalyzer.Tests
                 new SupportCardName(30003, "友卡", 0,   1003),
                 new SupportCardName(30137, "神团", 0,   1004),
                 new SupportCardName(30067, "皇团", 101, 1005),
+                new SupportCardName(30241, "传奇团", 0,   9047),
                 new BaseName(101, "理事长"),
                 new BaseName(1001, "训练员"),
             ]);
@@ -137,6 +138,15 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.Equal(PartnerPriority.友人, partner.Priority);
             Assert.False(partner.Shining);
             Assert.False(partner.IsNpc);
+        }
+
+        [Fact]
+        public void Shining_True_ForLegendFriendshipGroupCard()
+        {
+            var partner = BuildPartner(position: 5, cardId: 30241, friendship: 90, commandId: 102);
+
+            Assert.True(partner.Shining);
+            Assert.Equal(PartnerPriority.友人, partner.Priority);
         }
 
         [Fact]

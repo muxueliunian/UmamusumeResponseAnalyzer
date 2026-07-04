@@ -274,6 +274,69 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
+        public async Task HandleKey_SelectablePopupMovesSelectionAndConfirms()
+        {
+            var sink = new RecordingOverlaySink();
+            KeyboardManager.OverlaySink = sink;
+            KeyboardManager.PopupAutoCloseDelay = TimeSpan.FromSeconds(3);
+            var confirmedLineIndex = -1;
+            KeyboardManager.ShowPopup(new KeyboardPopup(
+                [
+                    new KeyboardPopupLine("Workspaces", ConsoleColor.White, IsMarkup: false),
+                    new KeyboardPopupLine("* First", ConsoleColor.White, IsMarkup: false),
+                    new KeyboardPopupLine("  Second", ConsoleColor.White, IsMarkup: false)
+                ],
+                Selection: new KeyboardPopupSelection([1, 2], 0, lineIndex =>
+                {
+                    confirmedLineIndex = lineIndex;
+                    return Task.CompletedTask;
+                })));
+
+            Assert.NotNull(sink.Popup);
+            Assert.Null(sink.Popup.ExpiresAt);
+            Assert.Equal(0, sink.Popup.Selection?.SelectedIndex);
+
+            await PressAsync(ConsoleKey.DownArrow);
+            Assert.Equal(1, sink.Popup?.Selection?.SelectedIndex);
+
+            await PressAsync(ConsoleKey.DownArrow);
+            Assert.Equal(1, sink.Popup?.Selection?.SelectedIndex);
+
+            await PressAsync(ConsoleKey.Enter);
+            Assert.Equal(2, confirmedLineIndex);
+            Assert.Null(sink.Popup);
+        }
+
+        [Fact]
+        public async Task HandleKey_SelectablePopupDoesNotConsumeModifierHotkey()
+        {
+            var sink = new RecordingOverlaySink();
+            KeyboardManager.OverlaySink = sink;
+            KeyboardManager.PopupAutoCloseDelay = TimeSpan.Zero;
+            KeyboardManager.ShowPopup(new KeyboardPopup(
+                [
+                    new KeyboardPopupLine("Workspaces", ConsoleColor.White, IsMarkup: false),
+                    new KeyboardPopupLine("* First", ConsoleColor.White, IsMarkup: false)
+                ],
+                Selection: new KeyboardPopupSelection([1], 0, _ => Task.CompletedTask)));
+            var triggered = false;
+            KeyboardManager.Register(
+                ConsoleKey.Enter,
+                ConsoleModifiers.Control,
+                "ctrl-enter",
+                () =>
+                {
+                    triggered = true;
+                    return Task.CompletedTask;
+                });
+
+            await KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\n', ConsoleKey.Enter, shift: false, alt: false, control: true));
+
+            Assert.True(triggered);
+            Assert.Null(sink.Popup);
+        }
+
+        [Fact]
         public async Task HandleKey_EnterCommandInput_SubmitsTypedCommand()
         {
             var sink = new RecordingOverlaySink();
@@ -305,6 +368,176 @@ namespace UmamusumeResponseAnalyzer.Tests
             await TypeAsync('/', ConsoleKey.Oem2);
             Assert.Equal("/", sink.CommandInput?.Text);
 
+            await PressAsync(ConsoleKey.Escape);
+            Assert.Null(sink.CommandInput);
+        }
+
+        [Fact]
+        public async Task HandleKey_CommandInputAcceptsShiftTextAndSuppressesHotkeys()
+        {
+            var sink = new RecordingOverlaySink();
+            KeyboardManager.OverlaySink = sink;
+            var triggered = false;
+            KeyboardManager.Register(
+                ConsoleKey.A,
+                ConsoleModifiers.Shift,
+                "shift-a",
+                () =>
+                {
+                    triggered = true;
+                    return Task.CompletedTask;
+                });
+
+            await PressAsync(ConsoleKey.Enter);
+            await TypeAsync('A', ConsoleKey.A, ConsoleModifiers.Shift);
+
+            Assert.False(triggered);
+            Assert.Equal("A", sink.CommandInput?.Text);
+        }
+
+        [Fact]
+        public async Task HandleKey_CommandInputSuppressesModifierHotkeys()
+        {
+            var sink = new RecordingOverlaySink();
+            KeyboardManager.OverlaySink = sink;
+            var triggered = new List<string>();
+            KeyboardManager.Register(ConsoleKey.K, ConsoleModifiers.Control, "ctrl-k", () =>
+            {
+                triggered.Add("ctrl");
+                return Task.CompletedTask;
+            });
+            KeyboardManager.Register(ConsoleKey.P, ConsoleModifiers.Alt, "alt-p", () =>
+            {
+                triggered.Add("alt");
+                return Task.CompletedTask;
+            });
+
+            await PressAsync(ConsoleKey.Enter);
+            await PressAsync(ConsoleKey.K, ConsoleModifiers.Control);
+            await PressAsync(ConsoleKey.P, ConsoleModifiers.Alt);
+
+            Assert.Empty(triggered);
+            Assert.Equal("", sink.CommandInput?.Text);
+        }
+
+        [Fact]
+        public async Task HandleKey_CommandHistoryStoresSubmittedCommandsAndNavigates()
+        {
+            var sink = new RecordingOverlaySink();
+            KeyboardManager.OverlaySink = sink;
+            KeyboardManager.SetCommandHandler(_ => Task.CompletedTask);
+
+            await SubmitCommandAsync("first");
+            await SubmitCommandAsync("second");
+
+            await PressAsync(ConsoleKey.Enter);
+            await PressAsync(ConsoleKey.UpArrow);
+            Assert.Equal("second", sink.CommandInput?.Text);
+
+            await PressAsync(ConsoleKey.UpArrow);
+            Assert.Equal("first", sink.CommandInput?.Text);
+
+            await PressAsync(ConsoleKey.UpArrow);
+            Assert.Equal("first", sink.CommandInput?.Text);
+
+            await PressAsync(ConsoleKey.DownArrow);
+            Assert.Equal("second", sink.CommandInput?.Text);
+
+            await PressAsync(ConsoleKey.DownArrow);
+            Assert.Equal("", sink.CommandInput?.Text);
+        }
+
+        [Fact]
+        public async Task HandleKey_CommandHistoryRestoresDraftAfterBrowsing()
+        {
+            var sink = new RecordingOverlaySink();
+            KeyboardManager.OverlaySink = sink;
+            KeyboardManager.SetCommandHandler(_ => Task.CompletedTask);
+
+            await SubmitCommandAsync("first");
+            await SubmitCommandAsync("second");
+
+            await PressAsync(ConsoleKey.Enter);
+            foreach (var ch in "draft")
+                await TypeAsync(ch, (ConsoleKey)char.ToUpperInvariant(ch));
+
+            await PressAsync(ConsoleKey.UpArrow);
+            Assert.Equal("second", sink.CommandInput?.Text);
+
+            await PressAsync(ConsoleKey.DownArrow);
+            Assert.Equal("draft", sink.CommandInput?.Text);
+        }
+
+        [Fact]
+        public async Task HandleKey_CommandCompletionUniqueCandidateReplacesText()
+        {
+            var sink = new RecordingOverlaySink();
+            KeyboardManager.OverlaySink = sink;
+            KeyboardManager.SetCommandHandler(
+                _ => Task.CompletedTask,
+                input => input == "/p" ? ["/plugin"] : []);
+
+            await TypeAsync('/', ConsoleKey.Oem2);
+            await TypeAsync('p', ConsoleKey.P);
+            await PressAsync(ConsoleKey.Tab);
+
+            Assert.Equal("/plugin", sink.CommandInput?.Text);
+            Assert.Empty(sink.CommandInput?.CompletionCandidates ?? []);
+        }
+
+        [Fact]
+        public async Task HandleKey_CommandCompletionMultipleCandidatesUsesCommonPrefixAndShowsCandidates()
+        {
+            var sink = new RecordingOverlaySink();
+            KeyboardManager.OverlaySink = sink;
+            KeyboardManager.SetCommandHandler(
+                _ => Task.CompletedTask,
+                input => input == "/p" ? ["/plugin list", "/plugin load"] : []);
+
+            await TypeAsync('/', ConsoleKey.Oem2);
+            await TypeAsync('p', ConsoleKey.P);
+            await PressAsync(ConsoleKey.Tab);
+
+            Assert.Equal("/plugin l", sink.CommandInput?.Text);
+            Assert.Equal(["/plugin list", "/plugin load"], sink.CommandInput?.CompletionCandidates);
+        }
+
+        [Fact]
+        public async Task HandleKey_CommandCompletionNoCandidatesKeepsText()
+        {
+            var sink = new RecordingOverlaySink();
+            KeyboardManager.OverlaySink = sink;
+            KeyboardManager.SetCommandHandler(
+                _ => Task.CompletedTask,
+                _ => []);
+
+            await TypeAsync('/', ConsoleKey.Oem2);
+            await TypeAsync('x', ConsoleKey.X);
+            await PressAsync(ConsoleKey.Tab);
+
+            Assert.Equal("/x", sink.CommandInput?.Text);
+            Assert.Empty(sink.CommandInput?.CompletionCandidates ?? []);
+        }
+
+        [Fact]
+        public async Task HandleKey_CommandCompletionClearsOnEditAndCancel()
+        {
+            var sink = new RecordingOverlaySink();
+            KeyboardManager.OverlaySink = sink;
+            KeyboardManager.SetCommandHandler(
+                _ => Task.CompletedTask,
+                input => input == "/p" ? ["/plugin list", "/plugin load"] : []);
+
+            await TypeAsync('/', ConsoleKey.Oem2);
+            await TypeAsync('p', ConsoleKey.P);
+            await PressAsync(ConsoleKey.Tab);
+            Assert.NotEmpty(sink.CommandInput?.CompletionCandidates ?? []);
+
+            await TypeAsync('o', ConsoleKey.O);
+            Assert.Equal("/plugin lo", sink.CommandInput?.Text);
+            Assert.Empty(sink.CommandInput?.CompletionCandidates ?? []);
+
+            await PressAsync(ConsoleKey.Tab);
             await PressAsync(ConsoleKey.Escape);
             Assert.Null(sink.CommandInput);
         }
@@ -488,6 +721,14 @@ namespace UmamusumeResponseAnalyzer.Tests
                 modifiers.HasFlag(ConsoleModifiers.Shift),
                 modifiers.HasFlag(ConsoleModifiers.Alt),
                 modifiers.HasFlag(ConsoleModifiers.Control)));
+        }
+
+        static async Task SubmitCommandAsync(string command)
+        {
+            await PressAsync(ConsoleKey.Enter);
+            foreach (var ch in command)
+                await TypeAsync(ch, (ConsoleKey)char.ToUpperInvariant(ch));
+            await PressAsync(ConsoleKey.Enter);
         }
 
         sealed class RecordingOverlaySink : IKeyboardOverlaySink

@@ -43,19 +43,19 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
     public sealed class PluginLiveDisplayOutput : ILiveDisplayOutput
     {
         readonly string pluginId;
-        readonly string workspaceIdPrefix;
         readonly UiHost uiHost;
 
         public PluginLiveDisplayOutput(string pluginId, UiHost uiHost)
         {
             this.pluginId = NormalizeComponent(pluginId, nameof(pluginId));
-            workspaceIdPrefix = $"{this.pluginId.Length}:{this.pluginId}:";
             this.uiHost = uiHost;
         }
 
-        public LiveDisplayWorkspace CreateWorkspace(string id, string title)
+        public LiveDisplayWorkspace? CurrentWorkspace => uiHost.CurrentWorkspace;
+
+        public LiveDisplayWorkspace CreateWorkspace(string title)
         {
-            return uiHost.CreateWorkspace(ComposeWorkspaceId(id), title);
+            return uiHost.CreateWorkspace(title);
         }
 
         public void SwitchWorkspace(LiveDisplayWorkspace workspace)
@@ -73,7 +73,12 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         }
 
         public void SetPanel(LiveDisplayWorkspace workspace, string key, string title, IRenderable content, bool fullBleed = false)
-            => uiHost.SetPanel(new LiveDisplayPanel(workspace, pluginId, key, title, content, DateTimeOffset.Now, fullBleed));
+            => SetPanel(workspace, key, title, content, fullBleed, switchToWorkspace: true);
+
+        public void SetPanel(LiveDisplayWorkspace workspace, string key, string title, IRenderable content, bool fullBleed, bool switchToWorkspace)
+            => uiHost.SetPanel(
+                new LiveDisplayPanel(workspace, pluginId, key, title, content, DateTimeOffset.Now, fullBleed),
+                switchToWorkspace);
 
         public void Log(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info)
             => uiHost.Log(new LiveDisplayLogLine(workspace, pluginId, text, severity, IsMarkup: false, DateTimeOffset.Now));
@@ -84,16 +89,10 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         public void Notify(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info, TimeSpan? ttl = null)
             => uiHost.Notify(new LiveDisplayNotification(workspace, pluginId, text, severity, LiveDisplayNotification.ExpiresAtFromNow(severity, ttl)));
 
-        string ComposeWorkspaceId(string id)
-        {
-            var normalizedId = NormalizeComponent(id, nameof(id));
-            return workspaceIdPrefix + normalizedId;
-        }
-
         static string NormalizeComponent(string value, string parameterName)
         {
             if (string.IsNullOrWhiteSpace(value))
-                throw new ArgumentException("Plugin/workspace id 不能为空。", parameterName);
+                throw new ArgumentException("Plugin id 不能为空。", parameterName);
 
             return value.Trim();
         }

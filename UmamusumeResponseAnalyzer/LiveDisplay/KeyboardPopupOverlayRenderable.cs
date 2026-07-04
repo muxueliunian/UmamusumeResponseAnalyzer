@@ -28,6 +28,8 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             return true;
         }
 
+        protected override int? GetFallbackHeight(int maxWidth, int overlayHeight, OverlayPlacement placement)
+            => height > 0 ? height : null;
         static int EffectiveHeight(RenderOptions options, int fallbackHeight) => options.Height ?? fallbackHeight;
 
         static List<IReadOnlyList<Segment>> BuildLines(
@@ -47,13 +49,14 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             var scrollOffset = Math.Clamp(popup.ScrollOffset, 0, maxOffset);
             var scrollable = scrollOffset > 0 || scrollOffset + visibleCount < popup.Lines.Count;
             var countdown = PopupCountdown.Format(popup.ExpiresAt, now);
+            var selectedLineIndex = popup.Selection?.SelectedLineIndex ?? -1;
             var lines = new List<IReadOnlyList<Segment>>(visibleCount + 2)
             {
                 PlainLine(BuildTopBorder(width, scrollOffset, visibleCount, popup.Lines.Count, scrollable))
             };
 
             for (var i = scrollOffset; i < scrollOffset + visibleCount; i++)
-                lines.Add(BuildContentLine(popup.Lines[i], width, options));
+                lines.Add(BuildContentLine(popup.Lines[i], width, options, popup.Selection is not null, i == selectedLineIndex));
 
             lines.Add(PlainLine(PopupFrame.BottomWithRightLabel(width, countdown)));
             return lines;
@@ -68,15 +71,21 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             return PopupFrame.TopWithCenteredLabel(width, label);
         }
 
-        static IReadOnlyList<Segment> BuildContentLine(KeyboardPopupLine line, int width, RenderOptions options)
+        static IReadOnlyList<Segment> BuildContentLine(
+            KeyboardPopupLine line,
+            int width,
+            RenderOptions options,
+            bool selectable,
+            bool selected)
         {
-            var contentWidth = Math.Max(0, width - 4);
+            var contentWidth = Math.Max(0, width - (selectable ? 5 : 4));
             var fittedContent = line.IsMarkup
                 ? FitSegmentsToCellWidth(BuildMarkupContent(line.Text, contentWidth, options), contentWidth).ToArray()
                 : [BuildTextSegment(FitToCellWidth(line.Text, contentWidth), line.Color)];
+            var prefix = selectable ? selected ? "│> " : "│  " : "│ ";
             return
             [
-                new Segment("│ "),
+                new Segment(prefix),
                 ..fittedContent,
                 new Segment(" │")
             ];

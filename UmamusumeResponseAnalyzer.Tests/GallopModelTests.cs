@@ -30,6 +30,17 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Theory]
+        [MemberData(nameof(PacketCorpus.RequestDescriptorCases), MemberType = typeof(PacketCorpus))]
+        public void Request_DeserializesToCatalogModel(string? path, Type? requestType)
+        {
+            Assert.SkipWhen(path is null || requestType is null, "无带 canonical URL 的请求语料");
+
+            var dto = MessagePackSerializer.Deserialize(requestType!, PacketCorpus.LoadBytes(path!));
+
+            Assert.NotNull(dto);
+        }
+
+        [Theory]
         [MemberData(nameof(PacketCorpus.SingleModeCases), MemberType = typeof(PacketCorpus))]
         public void SingleModeCheckEventResponse_DeserializesToModel(string? path)
         {
@@ -63,6 +74,22 @@ namespace UmamusumeResponseAnalyzer.Tests
             var dto = MessagePackSerializer.Deserialize<SingleModeHomeInfo>(new byte[] { MessagePackCode.Nil });
 
             Assert.Null(dto);
+        }
+
+        [Fact]
+        public void EmptyArrayObjectValue_DeserializesReferenceFieldAsNull()
+        {
+            var buffer = new System.Buffers.ArrayBufferWriter<byte>();
+            var writer = new MessagePackWriter(buffer);
+            writer.WriteMapHeader(1);
+            writer.Write("start_dress_info");
+            writer.WriteArrayHeader(0);
+            writer.Flush();
+
+            var dto = MessagePackSerializer.Deserialize<SingleModeLoadCommon>(buffer.WrittenMemory);
+
+            Assert.NotNull(dto);
+            Assert.Null(dto!.start_dress_info);
         }
     }
 }

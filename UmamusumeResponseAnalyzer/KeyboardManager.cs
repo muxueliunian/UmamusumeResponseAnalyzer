@@ -26,8 +26,13 @@ namespace UmamusumeResponseAnalyzer
         static int popupGeneration;
         static readonly AsyncLocal<object?> registrationOwner = new();
         static readonly StringBuilder commandBuffer = new();
+        static readonly List<string> commandHistory = [];
+        static IReadOnlyList<string> commandCompletionCandidates = [];
+        static string commandDraft = string.Empty;
+        static int commandHistoryIndex;
         static bool inCommandInput;
         static Func<string, Task>? commandHandler;
+        static Func<string, IReadOnlyList<string>>? commandCompletionProvider;
 
         public static TimeSpan PopupAutoCloseDelay { get; set; } = TimeSpan.FromSeconds(3);
         internal static IKeyboardOverlaySink? OverlaySink { get; set; }
@@ -98,9 +103,20 @@ namespace UmamusumeResponseAnalyzer
 
         public static void SetCommandHandler(Func<string, Task>? handler)
         {
+            SetCommandHandler(handler, completionProvider: null);
+        }
+
+        public static void SetCommandHandler(
+            Func<string, Task>? handler,
+            Func<string, IReadOnlyList<string>>? completionProvider)
+        {
             commandHandler = handler;
+            commandCompletionProvider = completionProvider;
             if (handler is null)
+            {
                 CancelCommandInput();
+                ClearCommandHistory();
+            }
         }
 
         public static void UnregisterAll()
@@ -149,8 +165,13 @@ namespace UmamusumeResponseAnalyzer
 
             var handler = commandHandler;
             var handlerAssembly = handler is null ? null : AssemblyOf(handler);
-            if (handlerAssembly is not null && assemblies.Contains(handlerAssembly))
+            var completionProvider = commandCompletionProvider;
+            var completionProviderAssembly = completionProvider is null ? null : AssemblyOf(completionProvider);
+            if ((handlerAssembly is not null && assemblies.Contains(handlerAssembly)) ||
+                (completionProviderAssembly is not null && assemblies.Contains(completionProviderAssembly)))
+            {
                 SetCommandHandler(null);
+            }
         }
 
         public static IReadOnlyDictionary<(ConsoleKey Key, ConsoleModifiers Modifiers), HotkeyEntry> Hotkeys => hotkeys;
@@ -284,14 +305,19 @@ namespace UmamusumeResponseAnalyzer
                 return;
             }
 
-            if (await TryHandleHotkeyAsync(keyInfo))
-                return;
-
             if (HasActivePopup())
             {
-                HandlePopupKey(keyInfo);
+                if (await HandlePopupKeyAsync(keyInfo))
+                    return;
+
+                if (await TryHandleHotkeyAsync(keyInfo))
+                    return;
+
                 return;
             }
+
+            if (await TryHandleHotkeyAsync(keyInfo))
+                return;
 
             TryBeginCommandInput(keyInfo);
         }
@@ -315,8 +341,20 @@ namespace UmamusumeResponseAnalyzer
                         CancelCommandInput();
                     break;
 
+                case ConsoleKey.UpArrow:
+                    MoveCommandHistory(-1);
+                    break;
+
+                case ConsoleKey.DownArrow:
+                    MoveCommandHistory(1);
+                    break;
+
+                case ConsoleKey.Tab:
+                    CompleteCommandInput();
+                    break;
+
                 default:
-                    if (keyInfo.Modifiers == 0 && !char.IsControl(keyInfo.KeyChar))
+                    if (!char.IsControl(keyInfo.KeyChar))
                         AppendCommandInput(keyInfo.KeyChar);
                     break;
             }
@@ -356,6 +394,9 @@ namespace UmamusumeResponseAnalyzer
                 inCommandInput = true;
                 commandBuffer.Clear();
                 commandBuffer.Append(initialText);
+                commandHistoryIndex = commandHistory.Count;
+                commandDraft = initialText;
+                commandCompletionCandidates = [];
                 initialText = commandBuffer.ToString();
             }
 
@@ -372,6 +413,7 @@ namespace UmamusumeResponseAnalyzer
 
                 commandBuffer.Append(keyChar);
                 text = commandBuffer.ToString();
+                ResetCommandHistoryNavigationLocked(text);
             }
 
             OverlaySink?.ShowCommandInput(new KeyboardCommandInput(text));
@@ -387,10 +429,122 @@ namespace UmamusumeResponseAnalyzer
 
                 commandBuffer.Remove(commandBuffer.Length - 1, 1);
                 text = commandBuffer.ToString();
+                ResetCommandHistoryNavigationLocked(text);
             }
 
             OverlaySink?.ShowCommandInput(new KeyboardCommandInput(text));
             return true;
+        }
+
+        static void MoveCommandHistory(int delta)
+        {
+            string text;
+            lock (commandInputSync)
+            {
+                if (!inCommandInput || commandHistory.Count == 0)
+                    return;
+
+                if (delta < 0)
+                {
+                    if (commandHistoryIndex == commandHistory.Count)
+                        commandDraft = commandBuffer.ToString();
+
+                    commandHistoryIndex = Math.Max(0, commandHistoryIndex - 1);
+                    commandBuffer.Clear();
+                    commandBuffer.Append(commandHistory[commandHistoryIndex]);
+                }
+                else
+                {
+                    if (commandHistoryIndex >= commandHistory.Count)
+                        return;
+
+                    commandHistoryIndex++;
+                    commandBuffer.Clear();
+                    commandBuffer.Append(commandHistoryIndex == commandHistory.Count
+                        ? commandDraft
+                        : commandHistory[commandHistoryIndex]);
+                }
+
+                commandCompletionCandidates = [];
+                text = commandBuffer.ToString();
+            }
+
+            OverlaySink?.ShowCommandInput(new KeyboardCommandInput(text));
+        }
+
+        static void CompleteCommandInput()
+        {
+            string text;
+            Func<string, IReadOnlyList<string>>? provider;
+            lock (commandInputSync)
+            {
+                if (!inCommandInput)
+                    return;
+
+                text = commandBuffer.ToString();
+                provider = commandCompletionProvider;
+            }
+
+            if (provider is null)
+            {
+                ClearCommandCompletionCandidates();
+                return;
+            }
+
+            IReadOnlyList<string> candidates;
+            try
+            {
+                candidates = provider(text);
+            }
+            catch (Exception ex)
+            {
+                LiveDisplayConsole.Notify("Keyboard", $"命令补全失败: {ex.Message}", LiveDisplaySeverity.Error);
+                LiveDisplayConsole.LogException("Keyboard", ex);
+                ClearCommandCompletionCandidates();
+                return;
+            }
+
+            ApplyCommandCompletion(text, candidates);
+        }
+
+        static void ApplyCommandCompletion(string originalText, IReadOnlyList<string> candidates)
+        {
+            string text;
+            IReadOnlyList<string> shownCandidates = [];
+            lock (commandInputSync)
+            {
+                if (!inCommandInput || commandBuffer.ToString() != originalText)
+                    return;
+
+                if (candidates.Count == 0)
+                {
+                    commandCompletionCandidates = [];
+                    text = commandBuffer.ToString();
+                }
+                else if (candidates.Count == 1)
+                {
+                    commandBuffer.Clear();
+                    commandBuffer.Append(candidates[0]);
+                    text = commandBuffer.ToString();
+                    ResetCommandHistoryNavigationLocked(text);
+                }
+                else
+                {
+                    var commonPrefix = LongestCommonPrefix(candidates);
+                    if (commonPrefix.Length > commandBuffer.Length)
+                    {
+                        commandBuffer.Clear();
+                        commandBuffer.Append(commonPrefix);
+                    }
+
+                    text = commandBuffer.ToString();
+                    commandCompletionCandidates = candidates.ToArray();
+                    shownCandidates = commandCompletionCandidates;
+                    ResetCommandHistoryNavigationLocked(text, clearCompletions: false);
+                }
+            }
+
+            OverlaySink?.ShowCommandInput(new KeyboardCommandInput(text, shownCandidates));
         }
 
         static (string Command, Func<string, Task>? Handler) EndCommandInputForSubmit()
@@ -400,9 +554,14 @@ namespace UmamusumeResponseAnalyzer
             lock (commandInputSync)
             {
                 command = commandBuffer.ToString();
+                if (!string.IsNullOrWhiteSpace(command))
+                    commandHistory.Add(command);
                 commandBuffer.Clear();
                 inCommandInput = false;
                 handler = commandHandler;
+                commandHistoryIndex = commandHistory.Count;
+                commandDraft = string.Empty;
+                commandCompletionCandidates = [];
             }
 
             OverlaySink?.HideCommandInput();
@@ -419,10 +578,66 @@ namespace UmamusumeResponseAnalyzer
 
                 inCommandInput = false;
                 commandBuffer.Clear();
+                commandHistoryIndex = commandHistory.Count;
+                commandDraft = string.Empty;
+                commandCompletionCandidates = [];
             }
 
             if (shouldHide)
                 OverlaySink?.HideCommandInput();
+        }
+
+        static void ClearCommandHistory()
+        {
+            lock (commandInputSync)
+            {
+                commandHistory.Clear();
+                commandHistoryIndex = 0;
+                commandDraft = string.Empty;
+                commandCompletionCandidates = [];
+            }
+        }
+
+        static void ClearCommandCompletionCandidates()
+        {
+            string text;
+            lock (commandInputSync)
+            {
+                if (!inCommandInput)
+                    return;
+
+                commandCompletionCandidates = [];
+                text = commandBuffer.ToString();
+            }
+
+            OverlaySink?.ShowCommandInput(new KeyboardCommandInput(text));
+        }
+
+        static void ResetCommandHistoryNavigationLocked(string text, bool clearCompletions = true)
+        {
+            commandHistoryIndex = commandHistory.Count;
+            commandDraft = text;
+            if (clearCompletions)
+                commandCompletionCandidates = [];
+        }
+
+        static string LongestCommonPrefix(IReadOnlyList<string> values)
+        {
+            if (values.Count == 0)
+                return string.Empty;
+
+            var prefix = values[0];
+            for (var i = 1; i < values.Count && prefix.Length > 0; i++)
+            {
+                var value = values[i];
+                var length = Math.Min(prefix.Length, value.Length);
+                var j = 0;
+                while (j < length && prefix[j] == value[j])
+                    j++;
+                prefix = prefix[..j];
+            }
+
+            return prefix;
         }
 
         static async Task<bool> TryHandleHotkeyAsync(ConsoleKeyInfo keyInfo)
@@ -436,10 +651,13 @@ namespace UmamusumeResponseAnalyzer
             return true;
         }
 
-        static bool HandlePopupKey(ConsoleKeyInfo keyInfo)
+        static async Task<bool> HandlePopupKeyAsync(ConsoleKeyInfo keyInfo)
         {
             if (keyInfo.Modifiers != 0)
                 return false;
+
+            if (HasSelectablePopup())
+                return await HandleSelectablePopupKeyAsync(keyInfo);
 
             switch (keyInfo.Key)
             {
@@ -478,13 +696,66 @@ namespace UmamusumeResponseAnalyzer
             }
         }
 
+        static async Task<bool> HandleSelectablePopupKeyAsync(ConsoleKeyInfo keyInfo)
+        {
+            switch (keyInfo.Key)
+            {
+                case ConsoleKey.Enter:
+                    await ConfirmPopupSelectionAsync();
+                    return true;
+
+                case ConsoleKey.Spacebar:
+                case ConsoleKey.Escape:
+                    HidePopup();
+                    return true;
+
+                case ConsoleKey.UpArrow:
+                    MovePopupSelection(-1);
+                    return true;
+
+                case ConsoleKey.DownArrow:
+                    MovePopupSelection(1);
+                    return true;
+
+                case ConsoleKey.PageUp:
+                    MovePopupSelection(-5);
+                    return true;
+
+                case ConsoleKey.PageDown:
+                    MovePopupSelection(5);
+                    return true;
+
+                case ConsoleKey.Home:
+                    SetPopupSelection(0);
+                    return true;
+
+                case ConsoleKey.End:
+                    SetPopupSelection(int.MaxValue);
+                    return true;
+
+                default:
+                    return false;
+            }
+        }
+
         static bool HasActivePopup()
         {
             lock (popupSync)
                 return activePopup is not null;
         }
 
-        static void ShowPopup(KeyboardPopup popup)
+        static bool HasSelectablePopup()
+        {
+            lock (popupSync)
+                return activePopup?.Selection?.LineIndexes.Count > 0;
+        }
+
+        internal static void ShowPopup(KeyboardHandlerContext context)
+        {
+            ShowPopup(context.ToPopup());
+        }
+
+        internal static void ShowPopup(KeyboardPopup popup)
         {
             if (popup.Lines.Count == 0)
                 return;
@@ -494,11 +765,7 @@ namespace UmamusumeResponseAnalyzer
             int generation;
             lock (popupSync)
             {
-                shownPopup = popup with
-                {
-                    ScrollOffset = Math.Max(0, popup.ScrollOffset),
-                    ExpiresAt = GetPopupExpiresAt()
-                };
+                shownPopup = NormalizePopupForDisplay(popup, Math.Max(0, popup.ScrollOffset), refreshExpiresAt: true);
                 activePopup = shownPopup;
                 generation = unchecked(++popupGeneration);
             }
@@ -566,12 +833,52 @@ namespace UmamusumeResponseAnalyzer
                 if (activePopup is null)
                     return;
 
+                popup = NormalizePopupForDisplay(activePopup, scrollOffset, refreshExpiresAt: true);
+                activePopup = popup;
+                generation = unchecked(++popupGeneration);
+            }
+
+            OverlaySink?.ShowPopup(popup);
+            SchedulePopupAutoClose(generation, popup.ExpiresAt);
+        }
+
+        static void MovePopupSelection(int delta)
+        {
+            KeyboardPopupSelection? selection;
+            lock (popupSync)
+                selection = activePopup?.Selection;
+
+            if (selection is null)
+                return;
+
+            SetPopupSelection(selection.BoundedSelectedIndex + delta);
+        }
+
+        static void SetPopupSelection(int selectedIndex)
+        {
+            KeyboardPopup popup;
+            int generation;
+            lock (popupSync)
+            {
+                if (activePopup?.Selection is null)
+                    return;
+
+                var normalizedSelection = activePopup.Selection.Normalize();
+                var nextSelection = normalizedSelection with
+                {
+                    SelectedIndex = Math.Clamp(selectedIndex, 0, normalizedSelection.LineIndexes.Count - 1)
+                };
                 var visibleCount = Math.Min(activePopup.Lines.Count, EstimateVisiblePopupLines());
-                var maxOffset = Math.Max(0, activePopup.Lines.Count - visibleCount);
+                var scrollOffset = ScrollOffsetForSelectedLine(
+                    activePopup.ScrollOffset,
+                    nextSelection.SelectedLineIndex,
+                    visibleCount,
+                    activePopup.Lines.Count);
                 popup = activePopup with
                 {
-                    ScrollOffset = Math.Clamp(scrollOffset, 0, maxOffset),
-                    ExpiresAt = GetPopupExpiresAt()
+                    ScrollOffset = scrollOffset,
+                    Selection = nextSelection,
+                    ExpiresAt = null
                 };
                 activePopup = popup;
                 generation = unchecked(++popupGeneration);
@@ -579,6 +886,59 @@ namespace UmamusumeResponseAnalyzer
 
             OverlaySink?.ShowPopup(popup);
             SchedulePopupAutoClose(generation, popup.ExpiresAt);
+        }
+
+        static async Task ConfirmPopupSelectionAsync()
+        {
+            KeyboardPopupSelection? selection;
+            int selectedLineIndex;
+            lock (popupSync)
+            {
+                selection = activePopup?.Selection?.Normalize();
+                selectedLineIndex = selection?.SelectedLineIndex ?? -1;
+            }
+
+            HidePopup();
+            if (selection is null || selectedLineIndex < 0)
+                return;
+
+            await InvokeSafely(() => selection.ConfirmAsync(selectedLineIndex));
+        }
+
+        static KeyboardPopup NormalizePopupForDisplay(KeyboardPopup popup, int scrollOffset, bool refreshExpiresAt)
+        {
+            var selection = popup.Selection?.LineIndexes.Count > 0 ? popup.Selection.Normalize() : null;
+            var visibleCount = Math.Min(popup.Lines.Count, EstimateVisiblePopupLines());
+            scrollOffset = selection is null
+                ? ClampPopupScroll(popup.Lines.Count, visibleCount, scrollOffset)
+                : ScrollOffsetForSelectedLine(scrollOffset, selection.SelectedLineIndex, visibleCount, popup.Lines.Count);
+            return popup with
+            {
+                ScrollOffset = scrollOffset,
+                Selection = selection,
+                ExpiresAt = selection is null && refreshExpiresAt ? GetPopupExpiresAt() : null
+            };
+        }
+
+        static int ClampPopupScroll(int lineCount, int visibleCount, int scrollOffset)
+        {
+            var maxOffset = Math.Max(0, lineCount - visibleCount);
+            return Math.Clamp(scrollOffset, 0, maxOffset);
+        }
+
+        static int ScrollOffsetForSelectedLine(int scrollOffset, int selectedLineIndex, int visibleCount, int lineCount)
+        {
+            scrollOffset = ClampPopupScroll(lineCount, visibleCount, scrollOffset);
+            if (selectedLineIndex < 0)
+                return scrollOffset;
+
+            if (selectedLineIndex < scrollOffset)
+                return selectedLineIndex;
+
+            if (selectedLineIndex >= scrollOffset + visibleCount)
+                return ClampPopupScroll(lineCount, visibleCount, selectedLineIndex - visibleCount + 1);
+
+            return scrollOffset;
         }
 
         static DateTimeOffset? GetPopupExpiresAt()

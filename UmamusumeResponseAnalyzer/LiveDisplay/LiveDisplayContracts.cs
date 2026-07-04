@@ -4,10 +4,19 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay;
 
 public interface ILiveDisplayOutput
 {
-    LiveDisplayWorkspace CreateWorkspace(string id, string title);
+    LiveDisplayWorkspace? CurrentWorkspace { get; }
+    LiveDisplayWorkspace CreateWorkspace(string title);
     void SwitchWorkspace(LiveDisplayWorkspace workspace);
     void BindWorkspaceHotkey(LiveDisplayWorkspace workspace, ConsoleKey key, ConsoleModifiers modifiers = 0, string? description = null);
     void SetPanel(LiveDisplayWorkspace workspace, string key, string title, IRenderable content, bool fullBleed = false);
+    void SetPanel(LiveDisplayWorkspace workspace, string key, string title, IRenderable content, bool fullBleed, bool switchToWorkspace)
+    {
+        if (!switchToWorkspace)
+            throw new NotSupportedException("当前 LiveDisplay output 实现不支持 switchToWorkspace: false。");
+
+        SetPanel(workspace, key, title, content, fullBleed);
+    }
+
     void Log(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info);
     void MarkupLog(LiveDisplayWorkspace workspace, string markup, LiveDisplaySeverity severity = LiveDisplaySeverity.Info);
     void Notify(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info, TimeSpan? ttl = null);
@@ -15,25 +24,23 @@ public interface ILiveDisplayOutput
 
 public sealed class LiveDisplayWorkspace : IEquatable<LiveDisplayWorkspace>
 {
-    static readonly StringComparer IdComparer = StringComparer.Ordinal;
+    static readonly StringComparer TitleComparer = StringComparer.OrdinalIgnoreCase;
 
-    LiveDisplayWorkspace(string id, string title)
+    LiveDisplayWorkspace(string title)
     {
-        Id = Normalize(id, nameof(id));
         Title = Normalize(title, nameof(title));
     }
 
-    public string Id { get; }
     public string Title { get; }
 
-    public static LiveDisplayWorkspace Create(string id, string title)
+    public static LiveDisplayWorkspace Create(string title)
     {
-        return new LiveDisplayWorkspace(id, title);
+        return new LiveDisplayWorkspace(title);
     }
 
     public bool Equals(LiveDisplayWorkspace? other)
     {
-        return other is not null && IdComparer.Equals(Id, other.Id);
+        return other is not null && TitleComparer.Equals(Title, other.Title);
     }
 
     public override bool Equals(object? obj)
@@ -43,7 +50,7 @@ public sealed class LiveDisplayWorkspace : IEquatable<LiveDisplayWorkspace>
 
     public override int GetHashCode()
     {
-        return IdComparer.GetHashCode(Id);
+        return TitleComparer.GetHashCode(Title);
     }
 
     public override string ToString()
@@ -64,7 +71,7 @@ public sealed class LiveDisplayWorkspace : IEquatable<LiveDisplayWorkspace>
     static string Normalize(string value, string parameterName)
     {
         if (string.IsNullOrWhiteSpace(value))
-            throw new ArgumentException("Workspace id/title 不能为空。", parameterName);
+            throw new ArgumentException("Workspace title 不能为空。", parameterName);
 
         return value.Trim();
     }

@@ -75,6 +75,34 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.Equal(expected, card.TypeName);
         }
 
+        [Theory]
+        [InlineData(101, 101, true)]
+        [InlineData(101, 102, false)]
+        [InlineData(0, 102, false)]
+        public void SupportCardName_CanTriggerFriendshipTraining_UsesTrainingType(
+            int cardType,
+            int trainingType,
+            bool expected)
+        {
+            var card = new SupportCardName(30001, "卡名", cardType, 1004);
+
+            Assert.Equal(expected, card.CanTriggerFriendshipTraining(trainingType));
+        }
+
+        [Theory]
+        [InlineData(101)]
+        [InlineData(105)]
+        [InlineData(102)]
+        [InlineData(103)]
+        [InlineData(106)]
+        public void SupportCardName_CanTriggerFriendshipTraining_TreatsLegendGroupCardAsEligible(int trainingType)
+        {
+            var card = new SupportCardName(30241, "团体卡", 0, 9047);
+
+            Assert.True(card.IsFriendshipTrainingGroupCard);
+            Assert.True(card.CanTriggerFriendshipTraining(trainingType));
+        }
+
         // ---------- Motivation 隐式转换 ----------
         // implicit int => motivation 数值；implicit string => enumString
         [Theory]

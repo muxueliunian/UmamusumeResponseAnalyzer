@@ -42,6 +42,17 @@ public enum AnalyzerKind
     Response,
 }
 
+public sealed record GameHttpHeaders(
+    string? Sid,
+    string? AppVer,
+    string? ResVer,
+    string? ViewerId,
+    string? Device,
+    string? DeviceSubtype)
+{
+    public static GameHttpHeaders Empty { get; } = new(null, null, null, null, null, null);
+}
+
 public interface IPluginAnalyzerRegistry
 {
     IDisposable RegisterRequest<TEndpoint>(
@@ -49,20 +60,44 @@ public interface IPluginAnalyzerRegistry
         int priority = 0)
         where TEndpoint : IGameEndpoint;
 
+    IDisposable RegisterRequest<TEndpoint>(
+        Func<byte[], GameHttpHeaders, ValueTask> handler,
+        int priority = 0)
+        where TEndpoint : IGameEndpoint
+        => throw new NotSupportedException("当前 analyzer registry 不支持带 GameHttpHeaders 的 raw request handler。");
+
     IDisposable RegisterResponse<TEndpoint>(
         Func<byte[], ValueTask> handler,
         int priority = 0)
         where TEndpoint : IGameEndpoint;
+
+    IDisposable RegisterResponse<TEndpoint>(
+        Func<byte[], GameHttpHeaders, ValueTask> handler,
+        int priority = 0)
+        where TEndpoint : IGameEndpoint
+        => throw new NotSupportedException("当前 analyzer registry 不支持带 GameHttpHeaders 的 raw response handler。");
 
     IDisposable RegisterRequest<TEndpoint, TRequest>(
         Func<TRequest, ValueTask> handler,
         int priority = 0)
         where TEndpoint : IGameEndpoint;
 
+    IDisposable RegisterRequest<TEndpoint, TRequest>(
+        Func<TRequest, GameHttpHeaders, ValueTask> handler,
+        int priority = 0)
+        where TEndpoint : IGameEndpoint
+        => throw new NotSupportedException("当前 analyzer registry 不支持带 GameHttpHeaders 的 DTO request handler。");
+
     IDisposable RegisterResponse<TEndpoint, TResponse>(
         Func<TResponse, ValueTask> handler,
         int priority = 0)
         where TEndpoint : IGameEndpoint;
+
+    IDisposable RegisterResponse<TEndpoint, TResponse>(
+        Func<TResponse, GameHttpHeaders, ValueTask> handler,
+        int priority = 0)
+        where TEndpoint : IGameEndpoint
+        => throw new NotSupportedException("当前 analyzer registry 不支持带 GameHttpHeaders 的 DTO response handler。");
 }
 
 [AttributeUsage(AttributeTargets.Method, AllowMultiple = true, Inherited = false)]

@@ -150,6 +150,7 @@ namespace UmamusumeResponseAnalyzer
                     ctx.WriteLine("（没有加载任何插件）", ConsoleColor.DarkGray);
                 return Task.CompletedTask;
             });
+            KeyboardManager.SetCommandHandler(uiHost.HandleCommandAsync, uiHost.CompleteCommand);
 
             await RunLiveDisplayApplicationAsync(uiHost);
         }
@@ -261,6 +262,7 @@ namespace UmamusumeResponseAnalyzer
                 KeyboardManager.Stop();
                 uiHost.RequestShutdown();
                 KeyboardManager.OverlaySink = null;
+                KeyboardManager.SetCommandHandler(null);
                 LiveDisplayConsole.Unbind(uiHost);
             }
 

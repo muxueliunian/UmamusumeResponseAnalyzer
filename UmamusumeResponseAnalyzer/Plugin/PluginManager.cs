@@ -21,10 +21,30 @@ namespace UmamusumeResponseAnalyzer.Plugin
         Func<AnalyzerDispatchContext, ValueTask> Handler,
         string Source);
 
+    internal sealed record PluginRuntimeStatus(
+        string InternalName,
+        string DisplayName,
+        string Author,
+        Version? Version,
+        bool IsLoaded,
+        bool IsAvailable,
+        bool LoadInHost,
+        bool Failed,
+        string? FilePath);
+
     sealed class PluginScopedAnalyzerRegistry(IPlugin plugin) : IPluginAnalyzerRegistry
     {
         public IDisposable RegisterRequest<TEndpoint>(
             Func<byte[], ValueTask> handler,
+            int priority = 0)
+            where TEndpoint : IGameEndpoint
+        {
+            ArgumentNullException.ThrowIfNull(handler);
+            return RegisterRaw(AnalyzerKind.Request, typeof(TEndpoint), (payload, _) => handler(payload), priority);
+        }
+
+        public IDisposable RegisterRequest<TEndpoint>(
+            Func<byte[], GameHttpHeaders, ValueTask> handler,
             int priority = 0)
             where TEndpoint : IGameEndpoint
             => RegisterRaw(AnalyzerKind.Request, typeof(TEndpoint), handler, priority);
@@ -33,10 +53,28 @@ namespace UmamusumeResponseAnalyzer.Plugin
             Func<byte[], ValueTask> handler,
             int priority = 0)
             where TEndpoint : IGameEndpoint
+        {
+            ArgumentNullException.ThrowIfNull(handler);
+            return RegisterRaw(AnalyzerKind.Response, typeof(TEndpoint), (payload, _) => handler(payload), priority);
+        }
+
+        public IDisposable RegisterResponse<TEndpoint>(
+            Func<byte[], GameHttpHeaders, ValueTask> handler,
+            int priority = 0)
+            where TEndpoint : IGameEndpoint
             => RegisterRaw(AnalyzerKind.Response, typeof(TEndpoint), handler, priority);
 
         public IDisposable RegisterRequest<TEndpoint, TRequest>(
             Func<TRequest, ValueTask> handler,
+            int priority = 0)
+            where TEndpoint : IGameEndpoint
+        {
+            ArgumentNullException.ThrowIfNull(handler);
+            return RegisterDto<TRequest>(AnalyzerKind.Request, typeof(TEndpoint), typeof(TRequest), (payload, _) => handler(payload), priority);
+        }
+
+        public IDisposable RegisterRequest<TEndpoint, TRequest>(
+            Func<TRequest, GameHttpHeaders, ValueTask> handler,
             int priority = 0)
             where TEndpoint : IGameEndpoint
             => RegisterDto(AnalyzerKind.Request, typeof(TEndpoint), typeof(TRequest), handler, priority);
@@ -45,12 +83,21 @@ namespace UmamusumeResponseAnalyzer.Plugin
             Func<TResponse, ValueTask> handler,
             int priority = 0)
             where TEndpoint : IGameEndpoint
+        {
+            ArgumentNullException.ThrowIfNull(handler);
+            return RegisterDto<TResponse>(AnalyzerKind.Response, typeof(TEndpoint), typeof(TResponse), (payload, _) => handler(payload), priority);
+        }
+
+        public IDisposable RegisterResponse<TEndpoint, TResponse>(
+            Func<TResponse, GameHttpHeaders, ValueTask> handler,
+            int priority = 0)
+            where TEndpoint : IGameEndpoint
             => RegisterDto(AnalyzerKind.Response, typeof(TEndpoint), typeof(TResponse), handler, priority);
 
         IDisposable RegisterRaw(
             AnalyzerKind kind,
             Type endpointType,
-            Func<byte[], ValueTask> handler,
+            Func<byte[], GameHttpHeaders, ValueTask> handler,
             int priority)
         {
             ArgumentNullException.ThrowIfNull(handler);
@@ -60,7 +107,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 endpointType,
                 typeof(byte[]),
                 priority,
-                context => handler(context.Payload),
+                context => handler(context.Payload, context.Headers),
                 "programmatic raw analyzer");
         }
 
@@ -68,7 +115,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             AnalyzerKind kind,
             Type endpointType,
             Type payloadType,
-            Func<TPayload, ValueTask> handler,
+            Func<TPayload, GameHttpHeaders, ValueTask> handler,
             int priority)
         {
             ArgumentNullException.ThrowIfNull(handler);
@@ -81,7 +128,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 endpointType,
                 payloadType,
                 priority,
-                context => handler((TPayload)context.GetDto()),
+                context => handler((TPayload)context.GetDto(), context.Headers),
                 "programmatic DTO analyzer");
         }
     }
@@ -241,6 +288,44 @@ namespace UmamusumeResponseAnalyzer.Plugin
             finally { ExitDispatch(); }
         }
 
+        internal static IReadOnlyList<PluginRuntimeStatus> SnapshotPluginStatuses()
+        {
+            var scanned = ScanPluginMetadataForStatus();
+            EnterDispatch();
+            try
+            {
+                var loadedByName = LoadedPlugins
+                    .GroupBy(InternalName, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+                var names = scanned.Keys
+                    .Concat(Metadatas.Keys)
+                    .Concat(loadedByName.Keys)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(x => x, StringComparer.OrdinalIgnoreCase);
+                List<PluginRuntimeStatus> statuses = [];
+                foreach (var name in names)
+                {
+                    loadedByName.TryGetValue(name, out var plugin);
+                    var metadata = GetValueIgnoreCase(scanned, name) ?? GetValueIgnoreCase(Metadatas, name);
+                    var filePath = metadata?.FilePath;
+                    var failed = filePath is not null && FailedPlugins.Contains(filePath);
+                    statuses.Add(new(
+                        metadata?.PluginName ?? name,
+                        plugin?.Name ?? metadata?.PluginName ?? name,
+                        plugin?.Author ?? string.Empty,
+                        plugin?.Version,
+                        plugin is not null,
+                        metadata is not null,
+                        metadata?.LoadInHost ?? false,
+                        failed,
+                        filePath));
+                }
+
+                return statuses;
+            }
+            finally { ExitDispatch(); }
+        }
+
         internal static string InternalName(IPlugin plugin) => plugin.GetType().Assembly.GetName().Name ?? plugin.Name;
 
         internal static void BindLiveDisplay(Func<IPlugin, ILiveDisplayOutput> factory)
@@ -266,9 +351,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
         /// <summary>扫描 Plugins/ 下所有 dll 与 zip，把插件元数据（含卫星资源关联）写入 <paramref name="target"/>。</summary>
         static void ScanAll(Dictionary<string, PluginMetadata> target, Dictionary<string, PluginMetadata> assemblyTarget)
         {
-            var culture = LanguageConfig.GetCulture();
             var pluginsDir = new DirectoryInfo("Plugins");
             if (!pluginsDir.Exists) return;
+            var culture = LanguageConfig.GetCulture();
 
             foreach (var dll in pluginsDir.GetFiles("*.dll", SearchOption.AllDirectories))
             {
@@ -398,6 +483,21 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
         static bool TryGetAssemblyMetadata(string name, out PluginMetadata metadata)
             => AssemblyMetadatas.TryGetValue(name, out metadata!) || Metadatas.TryGetValue(name, out metadata!);
+
+        static TValue? GetValueIgnoreCase<TValue>(IReadOnlyDictionary<string, TValue> source, string key)
+            where TValue : class
+            => source.TryGetValue(key, out var value)
+                ? value
+                : source.FirstOrDefault(x => string.Equals(x.Key, key, StringComparison.OrdinalIgnoreCase)).Value;
+
+        static string ResolvePluginName(string pluginName, params IEnumerable<string>[] sources)
+        {
+            foreach (var source in sources)
+                if (source.FirstOrDefault(x => string.Equals(x, pluginName, StringComparison.OrdinalIgnoreCase)) is { } match)
+                    return match;
+
+            return pluginName;
+        }
 
         internal static void BuildGroups()
         {
@@ -789,11 +889,11 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
         static AnalyzerRegistration CreateAnalyzerRegistration(IPlugin plugin, MethodInfo method, AnalyzerAttribute analyzer)
         {
-            var payloadType = ValidateAttributeAnalyzerSignature(plugin, method, analyzer);
+            var (payloadType, hasHeaders) = ValidateAttributeAnalyzerSignature(plugin, method, analyzer);
             var source = $"{method.DeclaringType?.FullName}.{method.Name}";
             Func<AnalyzerDispatchContext, ValueTask> handler = payloadType == typeof(byte[])
-                ? context => InvokeAttributeAnalyzer(plugin, method, context.Payload)
-                : context => InvokeAttributeAnalyzer(plugin, method, context.GetDto());
+                ? context => InvokeAttributeAnalyzer(plugin, method, context.Payload, hasHeaders ? context.Headers : null)
+                : context => InvokeAttributeAnalyzer(plugin, method, context.GetDto(), hasHeaders ? context.Headers : null);
 
             return RegisterAnalyzerCore(
                 plugin,
@@ -807,20 +907,30 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 attribute: analyzer);
         }
 
-        static Type ValidateAttributeAnalyzerSignature(IPlugin plugin, MethodInfo method, AnalyzerAttribute analyzer)
+        static (Type PayloadType, bool HasHeaders) ValidateAttributeAnalyzerSignature(IPlugin plugin, MethodInfo method, AnalyzerAttribute analyzer)
         {
             var parameters = method.GetParameters();
-            if (parameters.Length != 1 || method.ReturnType != typeof(ValueTask))
+            if ((parameters.Length is not 1 and not 2) || method.ReturnType != typeof(ValueTask))
                 throw AnalyzerRegistrationException(
                     plugin,
                     method,
                     analyzer.EndpointType,
                     analyzer.Kind,
                     "<signature>",
-                    "ValueTask analyzer(TPayload payload)",
+                    "ValueTask analyzer(TPayload payload) or ValueTask analyzer(TPayload payload, GameHttpHeaders headers)",
                     DescribeAnalyzerSignature(method));
 
-            return parameters[0].ParameterType;
+            if (parameters.Length == 2 && parameters[1].ParameterType != typeof(GameHttpHeaders))
+                throw AnalyzerRegistrationException(
+                    plugin,
+                    method,
+                    analyzer.EndpointType,
+                    analyzer.Kind,
+                    "<signature>",
+                    "ValueTask analyzer(TPayload payload, GameHttpHeaders headers)",
+                    DescribeAnalyzerSignature(method));
+
+            return (parameters[0].ParameterType, parameters.Length == 2);
         }
 
         static AnalyzerRegistration RegisterAnalyzerCore(
@@ -881,10 +991,11 @@ namespace UmamusumeResponseAnalyzer.Plugin
             return $"return={method.ReturnType.FullName ?? method.ReturnType.Name}, parameters=({parameterText}){asyncVoid}";
         }
 
-        static ValueTask InvokeAttributeAnalyzer(IPlugin plugin, MethodInfo method, object payload)
+        static ValueTask InvokeAttributeAnalyzer(IPlugin plugin, MethodInfo method, object payload, GameHttpHeaders? headers)
         {
             var target = method.IsStatic ? null : plugin;
-            return (ValueTask)method.Invoke(target, [payload])!;
+            object?[] args = headers is null ? [payload] : [payload, headers];
+            return (ValueTask)method.Invoke(target, args)!;
         }
 
         static void CommitAnalyzerRegistration(AnalyzerRegistration registration)
@@ -1082,6 +1193,10 @@ namespace UmamusumeResponseAnalyzer.Plugin
             List<string> needRestart = [];
             try
             {
+                requested = requested
+                    .Select(name => ResolvePluginName(name, scanned.Keys, Metadatas.Keys, LoadedPlugins.Select(InternalName)))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
                 var ordered = BuildReloadOrder(requested, scanned);
                 var outcomes = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
                 foreach (var name in ordered)
@@ -1102,6 +1217,82 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 needRestart = requested.Where(name =>
                     outcomes.TryGetValue(name, out var ok) ? !ok : Metadatas.ContainsKey(name) && !IsPluginLoaded(name))
                     .ToList();
+            }
+            finally
+            {
+                ReloadLock.ExitWriteLock();
+                CompletePendingUnloads(pendingUnloads);
+            }
+
+            return needRestart;
+        }
+
+        internal static IReadOnlyList<string> LoadPlugins(params string[] pluginNames)
+        {
+            var requested = pluginNames.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (requested.Count == 0) return [];
+
+            using var transaction = EnterReloadTransaction();
+            var scanned = ScanPluginMetadata();
+            var pendingUnloads = new List<PendingPluginUnload>();
+            ReloadLock.EnterWriteLock();
+            List<string> needRestart = [];
+            try
+            {
+                var outcomes = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                foreach (var rawName in requested)
+                {
+                    var name = ResolvePluginName(rawName, scanned.Keys, Metadatas.Keys, LoadedPlugins.Select(InternalName));
+                    if (IsPluginLoaded(name))
+                    {
+                        outcomes[rawName] = true;
+                        continue;
+                    }
+
+                    if (!scanned.ContainsKey(name) && !Metadatas.ContainsKey(name))
+                    {
+                        LiveDisplayConsole.MarkupLog("Plugin", $"[yellow]插件 {rawName.EscapeMarkup()} 不存在，无法加载。[/]", LiveDisplaySeverity.Warning);
+                        outcomes[rawName] = false;
+                        continue;
+                    }
+
+                    outcomes[rawName] = ReloadPluginLocked(name, scanned, outcomes, pendingUnloads);
+                }
+
+                needRestart = requested.Where(name => !outcomes.TryGetValue(name, out var ok) || !ok).ToList();
+            }
+            finally
+            {
+                ReloadLock.ExitWriteLock();
+                CompletePendingUnloads(pendingUnloads);
+            }
+
+            return needRestart;
+        }
+
+        internal static IReadOnlyList<string> UnloadPlugins(params string[] pluginNames)
+        {
+            var requested = pluginNames.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (requested.Count == 0) return [];
+
+            using var transaction = EnterReloadTransaction();
+            var pendingUnloads = new List<PendingPluginUnload>();
+            ReloadLock.EnterWriteLock();
+            List<string> needRestart = [];
+            try
+            {
+                var outcomes = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                foreach (var rawName in requested)
+                {
+                    var name = ResolvePluginName(
+                        rawName,
+                        Metadatas.Keys,
+                        LoadedPlugins.Select(InternalName),
+                        ContextGroups.SelectMany(x => x));
+                    outcomes[rawName] = UnloadPluginLocked(name, outcomes, pendingUnloads);
+                }
+
+                needRestart = requested.Where(name => !outcomes.TryGetValue(name, out var ok) || !ok).ToList();
             }
             finally
             {
@@ -1155,6 +1346,14 @@ namespace UmamusumeResponseAnalyzer.Plugin
             Dictionary<string, PluginMetadata> assemblies = [];
             ScanAll(scanned, assemblies);
             ReplaceAssemblyMetadatas(assemblies);
+            return scanned;
+        }
+
+        static Dictionary<string, PluginMetadata> ScanPluginMetadataForStatus()
+        {
+            Dictionary<string, PluginMetadata> scanned = [];
+            Dictionary<string, PluginMetadata> assemblies = [];
+            ScanAll(scanned, assemblies);
             return scanned;
         }
 
@@ -1248,6 +1447,61 @@ namespace UmamusumeResponseAnalyzer.Plugin
             if (loaded)
                 LiveDisplayConsole.MarkupLog("Plugin", $"[green]插件 {pluginName.EscapeMarkup()} 已重载。[/]", LiveDisplaySeverity.Success);
             return outcomes[pluginName] = loaded;
+        }
+
+        static bool UnloadPluginLocked(
+            string pluginName,
+            Dictionary<string, bool> outcomes,
+            List<PendingPluginUnload> pendingUnloads)
+        {
+            if (outcomes.TryGetValue(pluginName, out var prior)) return prior;
+
+            var existing = GetValueIgnoreCase(Metadatas, pluginName);
+            if (existing is { LoadInHost: true })
+            {
+                LiveDisplayConsole.MarkupLog("Plugin", $"[yellow]插件 {pluginName.EscapeMarkup()} 在宿主上下文加载，不支持卸载，请重启。[/]", LiveDisplaySeverity.Warning);
+                return outcomes[pluginName] = false;
+            }
+
+            var group = ContextGroups.FirstOrDefault(g => g.Contains(pluginName, StringComparer.OrdinalIgnoreCase));
+            if (group is null)
+            {
+                if (existing is not null)
+                    Metadatas.Remove(existing.PluginName);
+
+                LiveDisplayConsole.MarkupLog("Plugin", $"[yellow]插件 {pluginName.EscapeMarkup()} 未加载。[/]", LiveDisplaySeverity.Warning);
+                return outcomes[pluginName] = true;
+            }
+
+            if (group.Any(n => GetValueIgnoreCase(Metadatas, n) is { LoadInHost: true }))
+            {
+                LiveDisplayConsole.MarkupLog("Plugin", $"[yellow]插件 {string.Join("、", group).EscapeMarkup()} 在宿主上下文加载，不支持卸载，请重启。[/]", LiveDisplaySeverity.Warning);
+                foreach (var name in group) outcomes[name] = false;
+                return outcomes[pluginName] = false;
+            }
+
+            if (Contexts.ContainsKey(GroupKey(group)))
+            {
+                if (!TryUnloadGroup(group, pendingUnloads))
+                {
+                    foreach (var name in group) outcomes[name] = false;
+                    return outcomes[pluginName] = false;
+                }
+
+                CompletePendingUnloadsOutsideReloadLock(pendingUnloads);
+            }
+            else
+            {
+                foreach (var name in group)
+                    Metadatas.Remove(name);
+                ContextGroups.RemoveAll(g => g.SetEquals(group));
+            }
+
+            foreach (var name in group)
+                outcomes[name] = true;
+
+            LiveDisplayConsole.MarkupLog("Plugin", $"[green]插件 {pluginName.EscapeMarkup()} 已卸载。[/]", LiveDisplaySeverity.Success);
+            return outcomes[pluginName] = true;
         }
 
         /// <summary>加载受本轮重载影响且尚无 ALC 的上下文组，对新实例调用 Initialize，并补发一次启动事件。</summary>

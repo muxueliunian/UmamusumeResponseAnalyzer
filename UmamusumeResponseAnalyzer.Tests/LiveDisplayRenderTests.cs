@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using Spectre.Console;
 using Spectre.Console.Rendering;
 using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.Plugin;
 using Xunit;
 
 namespace UmamusumeResponseAnalyzer.Tests
@@ -21,12 +22,13 @@ namespace UmamusumeResponseAnalyzer.Tests
             }
 
             KeyboardManager.UnregisterAll();
+            KeyboardManager.SetCommandHandler(null);
             KeyboardManager.OverlaySink = null;
             KeyboardManager.PopupAutoCloseDelay = TimeSpan.FromSeconds(3);
             LiveDisplayConsole.UnbindForTests();
         }
 
-        static LiveDisplayWorkspace Workspace(string id = "dynamic", string title = "动态") => LiveDisplayWorkspace.Create(id, title);
+        static LiveDisplayWorkspace Workspace(string title = "动态") => LiveDisplayWorkspace.Create(title);
 
         [Fact]
         public void RenderSnapshot_InitialState_RendersEmpty()
@@ -60,12 +62,163 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
+        public void RenderSnapshot_SetPanelSwitchesToUpdatedWorkspace()
+        {
+            var uiHost = new UiHost();
+            var first = Workspace("第一");
+            var second = Workspace("第二");
+            uiHost.SetPanel(new LiveDisplayPanel(
+                first,
+                "FirstPlugin",
+                "main",
+                "第一",
+                new Panel("FirstBody").Expand(),
+                DateTimeOffset.Now,
+                FullBleed: true));
+            Render(uiHost);
+
+            uiHost.SetPanel(new LiveDisplayPanel(
+                second,
+                "SecondPlugin",
+                "main",
+                "第二",
+                new Panel("SecondBody").Expand(),
+                DateTimeOffset.Now,
+                FullBleed: true));
+
+            var output = Render(uiHost);
+
+            Assert.Equal(second, uiHost.CurrentWorkspace);
+            Assert.Contains("SecondBody", output);
+            Assert.DoesNotContain("FirstBody", output);
+        }
+
+        [Fact]
+        public void RenderSnapshot_LogAndNotifyDoNotSwitchWorkspace()
+        {
+            var uiHost = new UiHost();
+            var first = Workspace("第一");
+            var second = Workspace("第二");
+            uiHost.SetPanel(new LiveDisplayPanel(
+                first,
+                "FirstPlugin",
+                "main",
+                "第一",
+                new Panel("FirstBody").Expand(),
+                DateTimeOffset.Now,
+                FullBleed: true));
+            uiHost.SetPanel(new LiveDisplayPanel(
+                second,
+                "SecondPlugin",
+                "main",
+                "第二",
+                new Panel("SecondBody").Expand(),
+                DateTimeOffset.Now,
+                FullBleed: true));
+            uiHost.SwitchWorkspace(first);
+            Render(uiHost);
+
+            uiHost.Log(new LiveDisplayLogLine(
+                second,
+                "SecondPlugin",
+                "SecondLog",
+                LiveDisplaySeverity.Info,
+                IsMarkup: false,
+                DateTimeOffset.Now));
+            uiHost.Notify(new LiveDisplayNotification(
+                second,
+                "SecondPlugin",
+                "SecondNotify",
+                LiveDisplaySeverity.Info,
+                DateTimeOffset.Now.AddSeconds(10)));
+
+            var output = Render(uiHost);
+
+            Assert.Equal(first, uiHost.CurrentWorkspace);
+            Assert.Contains("FirstBody", output);
+            Assert.DoesNotContain("SecondBody", output);
+        }
+
+        [Fact]
+        public void RenderSnapshot_SetPanelFollowsUpdatedWorkspaceAfterManualSwitch()
+        {
+            var uiHost = new UiHost();
+            var first = Workspace("第一");
+            var second = Workspace("第二");
+            uiHost.SetPanel(new LiveDisplayPanel(
+                first,
+                "FirstPlugin",
+                "main",
+                "第一",
+                new Panel("FirstBody").Expand(),
+                DateTimeOffset.Now,
+                FullBleed: true));
+            uiHost.SetPanel(new LiveDisplayPanel(
+                second,
+                "SecondPlugin",
+                "main",
+                "第二",
+                new Panel("SecondBody").Expand(),
+                DateTimeOffset.Now,
+                FullBleed: true));
+            uiHost.SwitchWorkspace(first);
+            Render(uiHost);
+
+            uiHost.SetPanel(new LiveDisplayPanel(
+                second,
+                "SecondPlugin",
+                "main",
+                "第二",
+                new Panel("SecondBodyUpdated").Expand(),
+                DateTimeOffset.Now,
+                FullBleed: true));
+
+            var output = Render(uiHost);
+
+            Assert.Equal(second, uiHost.CurrentWorkspace);
+            Assert.Contains("SecondBodyUpdated", output);
+            Assert.DoesNotContain("FirstBody", output);
+        }
+
+        [Fact]
+        public void PluginOutput_SetPanelCanUpdateWithoutSwitchingWorkspace()
+        {
+            var uiHost = new UiHost();
+            var output = uiHost.ForPlugin("DynamicPlugin");
+            var first = output.CreateWorkspace("第一");
+            var second = output.CreateWorkspace("第二");
+            output.SetPanel(first, "main", "第一面板", new Panel("FirstBody").Expand(), fullBleed: true);
+            output.SetPanel(second, "main", "第二面板", new Panel("SecondInitialBody").Expand(), fullBleed: true);
+            output.SwitchWorkspace(first);
+            Render(uiHost);
+
+            output.SetPanel(
+                second,
+                "main",
+                "第二面板",
+                new Panel("QuietUpdateBody").Expand(),
+                fullBleed: true,
+                switchToWorkspace: false);
+            var firstOutput = Render(uiHost);
+
+            Assert.Equal(first, uiHost.CurrentWorkspace);
+            Assert.Contains("FirstBody", firstOutput);
+            Assert.DoesNotContain("QuietUpdateBody", firstOutput);
+
+            output.SwitchWorkspace(second);
+            var secondOutput = Render(uiHost);
+
+            Assert.Contains("QuietUpdateBody", secondOutput);
+            Assert.DoesNotContain("SecondInitialBody", secondOutput);
+        }
+
+        [Fact]
         public async Task PluginOutput_BindWorkspaceHotkey_AllowsF1AndSwitchesWorkspace()
         {
             var uiHost = new UiHost();
             var output = uiHost.ForPlugin("DynamicPlugin");
-            var first = output.CreateWorkspace("first", "第一");
-            var second = output.CreateWorkspace("second", "第二");
+            var first = output.CreateWorkspace("第一");
+            var second = output.CreateWorkspace("第二");
             output.SetPanel(first, "main", "第一面板", new Panel("FirstBody").Expand(), fullBleed: true);
             output.SetPanel(second, "main", "第二面板", new Panel("SecondBody").Expand(), fullBleed: true);
             output.BindWorkspaceHotkey(second, ConsoleKey.F1);
@@ -77,46 +230,33 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public void PluginOutput_WorkspaceIdsAreCaseSensitive()
+        public void PluginOutput_CreateWorkspace_ReturnsExistingWorkspaceForSameTitleIgnoringCase()
         {
             var uiHost = new UiHost();
             var output = uiHost.ForPlugin("DynamicPlugin");
-            var upper = output.CreateWorkspace("Main", "大写");
-            var lower = output.CreateWorkspace("main", "小写");
-            output.SetPanel(upper, "main", "大写面板", new Panel("UpperBody").Expand(), fullBleed: true);
-            output.SetPanel(lower, "main", "小写面板", new Panel("LowerBody").Expand(), fullBleed: true);
+            var original = output.CreateWorkspace("Main");
+            var duplicate = output.CreateWorkspace("main");
 
-            output.SwitchWorkspace(upper);
-            var upperOutput = Render(uiHost);
-            output.SwitchWorkspace(lower);
-            var lowerOutput = Render(uiHost);
-
-            Assert.Contains("UpperBody", upperOutput);
-            Assert.DoesNotContain("LowerBody", upperOutput);
-            Assert.Contains("LowerBody", lowerOutput);
-            Assert.DoesNotContain("UpperBody", lowerOutput);
+            Assert.Same(original, duplicate);
         }
 
         [Fact]
-        public void PluginOutput_WorkspaceIdsDoNotCollideWhenPluginIdContainsColon()
+        public void PluginOutput_WorkspaceTitlesAreGlobalAcrossPlugins()
         {
             var uiHost = new UiHost();
             var firstOutput = uiHost.ForPlugin("a");
             var secondOutput = uiHost.ForPlugin("a:b");
-            var first = firstOutput.CreateWorkspace("b:c", "第一");
-            var second = secondOutput.CreateWorkspace("c", "第二");
-            firstOutput.SetPanel(first, "main", "第一面板", new Panel("FirstColonBody").Expand(), fullBleed: true);
-            secondOutput.SetPanel(second, "main", "第二面板", new Panel("SecondColonBody").Expand(), fullBleed: true);
+            var first = firstOutput.CreateWorkspace("共享");
+            var second = secondOutput.CreateWorkspace("共享");
+            firstOutput.SetPanel(first, "main", "第一面板", new Panel("FirstColonBody").Expand());
+            secondOutput.SetPanel(second, "main", "第二面板", new Panel("SecondColonBody").Expand());
 
             firstOutput.SwitchWorkspace(first);
-            var firstRendered = Render(uiHost);
-            secondOutput.SwitchWorkspace(second);
-            var secondRendered = Render(uiHost);
+            var rendered = Render(uiHost);
 
-            Assert.Contains("FirstColonBody", firstRendered);
-            Assert.DoesNotContain("SecondColonBody", firstRendered);
-            Assert.Contains("SecondColonBody", secondRendered);
-            Assert.DoesNotContain("FirstColonBody", secondRendered);
+            Assert.Same(first, second);
+            Assert.Contains("FirstColonBody", rendered);
+            Assert.Contains("SecondColonBody", rendered);
         }
 
         [Fact]
@@ -209,8 +349,8 @@ namespace UmamusumeResponseAnalyzer.Tests
         public void NotificationPopup_IsSharedAcrossWorkspaces()
         {
             var uiHost = new UiHost();
-            var first = Workspace("first", "第一");
-            var second = Workspace("second", "第二");
+            var first = Workspace("第一");
+            var second = Workspace("第二");
             uiHost.BindWorkspaceHotkey(second, ConsoleKey.F2);
             uiHost.SetPanel(new LiveDisplayPanel(
                 first,
@@ -455,6 +595,349 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
+        public void BootstrapWorkspace_IsRemovedWhenAnotherWorkspaceRegisters()
+        {
+            var uiHost = new UiHost();
+            var bootstrap = new BootstrapWorkspace(uiHost);
+            LiveDisplayConsole.Bind(uiHost);
+            LiveDisplayConsole.DefaultLogWorkspace = bootstrap.Workspace;
+            try
+            {
+                bootstrap.SetPhase("config", "配置", LiveDisplaySeverity.Success, "已读取 config.yaml");
+                Assert.Contains("启动状态", Render(uiHost, width: 120, height: 35));
+
+                var pluginWorkspace = uiHost.CreateWorkspace("插件");
+                uiHost.SetPanel(new LiveDisplayPanel(
+                    pluginWorkspace,
+                    "Plugin",
+                    "main",
+                    "插件",
+                    new Panel("PluginBody").Expand(),
+                    DateTimeOffset.Now,
+                    FullBleed: false));
+
+                var output = Render(uiHost, width: 120, height: 35);
+
+                Assert.Contains("PluginBody", output);
+                Assert.DoesNotContain("启动状态", output);
+                Assert.DoesNotContain("已读取 config.yaml", output);
+                Assert.Null(LiveDisplayConsole.DefaultLogWorkspace);
+
+                bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Success, "SHOULD_NOT_REAPPEAR");
+                bootstrap.Log("Server", "BOOTSTRAP_LOG_AFTER_REMOVAL", LiveDisplaySeverity.Success);
+                var outputAfterLateBootstrapUpdate = Render(uiHost, width: 120, height: 35);
+                Assert.Contains("PluginBody", outputAfterLateBootstrapUpdate);
+                Assert.DoesNotContain("SHOULD_NOT_REAPPEAR", outputAfterLateBootstrapUpdate);
+                Assert.DoesNotContain("BOOTSTRAP_LOG_AFTER_REMOVAL", outputAfterLateBootstrapUpdate);
+
+                uiHost.SwitchWorkspace(bootstrap.Workspace);
+                var outputAfterSwitchAttempt = Render(uiHost, width: 120, height: 35);
+                Assert.Contains("PluginBody", outputAfterSwitchAttempt);
+                Assert.DoesNotContain("SHOULD_NOT_REAPPEAR", outputAfterSwitchAttempt);
+                Assert.Equal(pluginWorkspace, uiHost.CurrentWorkspace);
+            }
+            finally
+            {
+                LiveDisplayConsole.DefaultLogWorkspace = null;
+                LiveDisplayConsole.Unbind(uiHost);
+            }
+        }
+
+        [Fact]
+        public async Task WorkspaceCommand_ListExcludesRemovedBootstrapWorkspace()
+        {
+            var uiHost = new UiHost();
+            KeyboardManager.OverlaySink = uiHost;
+            var bootstrap = new BootstrapWorkspace(uiHost);
+            LiveDisplayConsole.Bind(uiHost);
+            LiveDisplayConsole.DefaultLogWorkspace = bootstrap.Workspace;
+            try
+            {
+                var pluginWorkspace = uiHost.CreateWorkspace("插件");
+                uiHost.SetPanel(new LiveDisplayPanel(
+                    pluginWorkspace,
+                    "Plugin",
+                    "main",
+                    "插件",
+                    new Panel("PluginBody").Expand(),
+                    DateTimeOffset.Now));
+                Render(uiHost, width: 120, height: 35);
+
+                await uiHost.HandleCommandAsync("/workspace list");
+                var output = Render(uiHost, width: 120, height: 35);
+
+                Assert.Contains("Workspaces", output);
+                Assert.Contains("插件", output);
+                Assert.DoesNotContain("启动", output);
+            }
+            finally
+            {
+                LiveDisplayConsole.DefaultLogWorkspace = null;
+                LiveDisplayConsole.Unbind(uiHost);
+            }
+        }
+
+        [Fact]
+        public async Task WorkspaceCommand_SwitchChangesWorkspaceByCaseInsensitiveTitle()
+        {
+            var uiHost = new UiHost();
+            var first = uiHost.CreateWorkspace("First");
+            var second = uiHost.CreateWorkspace("Second");
+            uiHost.SetPanel(new LiveDisplayPanel(
+                first,
+                "FirstPlugin",
+                "main",
+                "第一",
+                new Panel("FirstBody").Expand(),
+                DateTimeOffset.Now,
+                FullBleed: true));
+            uiHost.SetPanel(new LiveDisplayPanel(
+                second,
+                "SecondPlugin",
+                "main",
+                "第二",
+                new Panel("SecondBody").Expand(),
+                DateTimeOffset.Now,
+                FullBleed: true));
+            uiHost.SwitchWorkspace(first);
+            Render(uiHost);
+
+            await uiHost.HandleCommandAsync("/workspace switch second");
+            var output = Render(uiHost);
+
+            Assert.Equal(second, uiHost.CurrentWorkspace);
+            Assert.Contains("SecondBody", output);
+            Assert.DoesNotContain("FirstBody", output);
+        }
+
+        [Theory]
+        [InlineData("/workspace")]
+        [InlineData("/workspace switch")]
+        public async Task WorkspaceCommand_SwitchSelectorCommandsOpenSelectorAndEnterSwitchesWorkspace(string command)
+        {
+            var uiHost = new UiHost();
+            KeyboardManager.OverlaySink = uiHost;
+            var first = uiHost.CreateWorkspace("First");
+            var second = uiHost.CreateWorkspace("Second");
+            uiHost.SetPanel(new LiveDisplayPanel(
+                first,
+                "FirstPlugin",
+                "main",
+                "第一",
+                new Panel("FirstBody").Expand(),
+                DateTimeOffset.Now,
+                FullBleed: true));
+            uiHost.SetPanel(new LiveDisplayPanel(
+                second,
+                "SecondPlugin",
+                "main",
+                "第二",
+                new Panel("SecondBody").Expand(),
+                DateTimeOffset.Now,
+                FullBleed: true));
+            uiHost.SwitchWorkspace(first);
+            Render(uiHost);
+
+            await uiHost.HandleCommandAsync(command);
+            var selectorOutput = Render(uiHost, width: 120, height: 35);
+
+            Assert.Equal(first, uiHost.CurrentWorkspace);
+            Assert.Contains("Workspaces", selectorOutput);
+            Assert.Contains("* First", selectorOutput);
+            Assert.Contains("Second", selectorOutput);
+            Assert.DoesNotContain("用法: /workspace", selectorOutput);
+
+            await KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\0', ConsoleKey.DownArrow, shift: false, alt: false, control: false));
+            Render(uiHost, width: 120, height: 35);
+            await KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\0', ConsoleKey.Enter, shift: false, alt: false, control: false));
+            var output = Render(uiHost, width: 120, height: 35);
+
+            Assert.Equal(second, uiHost.CurrentWorkspace);
+            Assert.Contains("SecondBody", output);
+            Assert.DoesNotContain("FirstBody", output);
+        }
+
+        [Fact]
+        public async Task WorkspaceCommand_SwitchUnknownTitleLogsWarningWithoutSwitching()
+        {
+            var uiHost = new UiHost();
+            var first = uiHost.CreateWorkspace("First");
+            uiHost.SetPanel(new LiveDisplayPanel(
+                first,
+                "FirstPlugin",
+                "main",
+                "第一",
+                new Panel("FirstBody").Expand(),
+                DateTimeOffset.Now));
+            uiHost.SwitchWorkspace(first);
+            Render(uiHost);
+
+            await uiHost.HandleCommandAsync("/workspace switch Missing");
+            var output = Render(uiHost, width: 120, height: 35);
+
+            Assert.Equal(first, uiHost.CurrentWorkspace);
+            Assert.Contains("FirstBody", output);
+            Assert.Contains("workspace 不存在: Missing", output);
+        }
+
+        [Fact]
+        public async Task WorkspaceCommand_IgnoresCommandWithoutLeadingSlash()
+        {
+            var uiHost = new UiHost();
+            KeyboardManager.OverlaySink = uiHost;
+            var workspace = uiHost.CreateWorkspace("插件");
+            uiHost.SetPanel(new LiveDisplayPanel(
+                workspace,
+                "Plugin",
+                "main",
+                "插件",
+                new Panel("PluginBody").Expand(),
+                DateTimeOffset.Now));
+
+            await uiHost.HandleCommandAsync("workspace list");
+            var output = Render(uiHost, width: 120, height: 35);
+
+            Assert.Contains("PluginBody", output);
+            Assert.DoesNotContain("Workspaces", output);
+        }
+
+        [Fact]
+        public async Task WorkspaceCommand_ListWithExtraArgumentsLogsUsage()
+        {
+            var uiHost = new UiHost();
+            var workspace = uiHost.CreateWorkspace("插件");
+            uiHost.SetPanel(new LiveDisplayPanel(
+                workspace,
+                "Plugin",
+                "main",
+                "插件",
+                new Panel("PluginBody").Expand(),
+                DateTimeOffset.Now));
+
+            await uiHost.HandleCommandAsync("/workspace list extra");
+            var output = Render(uiHost, width: 120, height: 35);
+
+            Assert.Contains("用法: /workspace", output);
+            Assert.Contains("switch", output);
+            Assert.DoesNotContain("Workspaces", output);
+        }
+
+        [Fact]
+        public async Task PluginCommand_DefaultShowsPluginList()
+        {
+            var uiHost = new UiHost();
+            KeyboardManager.OverlaySink = uiHost;
+            var workspace = uiHost.CreateWorkspace("插件");
+            uiHost.SetPanel(new LiveDisplayPanel(
+                workspace,
+                "Plugin",
+                "main",
+                "插件",
+                new Panel("PluginBody").Expand(),
+                DateTimeOffset.Now));
+
+            await uiHost.HandleCommandAsync("/plugin");
+            var output = Render(uiHost, width: 120, height: 35);
+
+            Assert.Contains("Plugins", output);
+            Assert.DoesNotContain("用法: /plugin", output);
+        }
+
+        [Fact]
+        public async Task PluginCommand_ListWithExtraArgumentsLogsUsage()
+        {
+            var uiHost = new UiHost();
+            var workspace = uiHost.CreateWorkspace("插件");
+            uiHost.SetPanel(new LiveDisplayPanel(
+                workspace,
+                "Plugin",
+                "main",
+                "插件",
+                new Panel("PluginBody").Expand(),
+                DateTimeOffset.Now));
+
+            await uiHost.HandleCommandAsync("/plugin list extra");
+            var output = Render(uiHost, width: 120, height: 35);
+
+            Assert.Contains("用法: /plugin", output);
+            Assert.DoesNotContain("Plugins", output);
+        }
+
+        [Fact]
+        public async Task PluginCommand_LoadWithoutNameLogsUsage()
+        {
+            var uiHost = new UiHost();
+            var workspace = uiHost.CreateWorkspace("插件");
+            uiHost.SetPanel(new LiveDisplayPanel(
+                workspace,
+                "Plugin",
+                "main",
+                "插件",
+                new Panel("PluginBody").Expand(),
+                DateTimeOffset.Now));
+
+            await uiHost.HandleCommandAsync("/plugin load");
+            var output = Render(uiHost, width: 120, height: 35);
+
+            Assert.Contains("用法: /plugin", output);
+            Assert.Contains("load", output);
+            Assert.Contains("unload", output);
+            Assert.Contains("reload", output);
+        }
+
+        [Fact]
+        public async Task PluginCommand_UnknownSubcommandLogsUsage()
+        {
+            var uiHost = new UiHost();
+            var workspace = uiHost.CreateWorkspace("插件");
+            uiHost.SetPanel(new LiveDisplayPanel(
+                workspace,
+                "Plugin",
+                "main",
+                "插件",
+                new Panel("PluginBody").Expand(),
+                DateTimeOffset.Now));
+
+            await uiHost.HandleCommandAsync("/plugin restart MissingPlugin");
+            var output = Render(uiHost, width: 120, height: 35);
+
+            Assert.Contains("用法: /plugin", output);
+        }
+
+        [Fact]
+        public void UiHost_CreateWorkspace_CanReuseTitleAfterWorkspaceRemoval()
+        {
+            var uiHost = new UiHost();
+            var bootstrap = new BootstrapWorkspace(uiHost);
+            var pluginWorkspace = uiHost.CreateWorkspace("插件");
+            uiHost.SetPanel(new LiveDisplayPanel(
+                pluginWorkspace,
+                "Plugin",
+                "main",
+                "插件",
+                new Panel("PluginBody").Expand(),
+                DateTimeOffset.Now,
+                FullBleed: true));
+            Render(uiHost);
+
+            var recreated = uiHost.CreateWorkspace("启动");
+            uiHost.SetPanel(new LiveDisplayPanel(
+                recreated,
+                "Recreated",
+                "main",
+                "启动",
+                new Panel("RecreatedBootstrapBody").Expand(),
+                DateTimeOffset.Now,
+                FullBleed: true));
+            uiHost.SwitchWorkspace(recreated);
+            var output = Render(uiHost);
+
+            Assert.NotSame(bootstrap.Workspace, recreated);
+            Assert.Contains("RecreatedBootstrapBody", output);
+            Assert.DoesNotContain("PluginBody", output);
+        }
+
+        [Fact]
         public async Task LiveDisplayConsole_RunAsync_BeforeUiHostRuns_KeepsConsoleInteractionOutput()
         {
             var uiHost = new UiHost();
@@ -641,6 +1124,27 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
+        public void KeyboardPopupOverlay_RendersSelectedLineMarker()
+        {
+            var popup = new KeyboardPopup(
+                [
+                    new KeyboardPopupLine("Workspaces", ConsoleColor.White, IsMarkup: false),
+                    new KeyboardPopupLine("* First", ConsoleColor.White, IsMarkup: false),
+                    new KeyboardPopupLine("  Second", ConsoleColor.White, IsMarkup: false)
+                ],
+                Selection: new KeyboardPopupSelection([1, 2], 1, _ => Task.CompletedTask));
+
+            var output = Render(new KeyboardPopupOverlayRenderable(
+                new Panel("PopupBase").Expand(),
+                popup,
+                80,
+                12,
+                bottomInset: 1), width: 80, height: 12);
+
+            Assert.Contains(">   Second", output);
+        }
+
+        [Fact]
         public void UiHost_RendersKeyboardCommandInput()
         {
             var uiHost = new UiHost();
@@ -657,8 +1161,83 @@ namespace UmamusumeResponseAnalyzer.Tests
             var output = Render(uiHost, width: 80, height: 16);
 
             Assert.Contains("CommandInputBody", output);
-            Assert.Contains("> /status", output);
-            Assert.Contains("ESC 取消", output);
+            Assert.Contains("Command Mode", output);
+            Assert.Contains("❯ /status", output);
+            Assert.Contains("Tab 补全", output);
+            Assert.Contains("↑↓ 历史", output);
+            Assert.Contains("Esc 取消", output);
+            Assert.Contains("┌", output);
+            Assert.Contains("└", output);
+        }
+
+        [Fact]
+        public void UiHost_RendersKeyboardCommandInputOverTallFullBleedContent()
+        {
+            const int height = 16;
+            var uiHost = new UiHost();
+            var tallContent = new Rows([.. Enumerable.Range(0, 50).Select(index => new Text($"TallLine{index:D2}"))]);
+            uiHost.SetPanel(new LiveDisplayPanel(
+                Workspace(),
+                "ScenarioAnalyzer",
+                "workspace",
+                "整页布局",
+                tallContent,
+                DateTimeOffset.Now,
+                FullBleed: true));
+            ((IKeyboardOverlaySink)uiHost).ShowCommandInput(new KeyboardCommandInput("/status"));
+
+            var visibleOutput = VisibleTail(Render(uiHost, width: 80, height: height), height);
+
+            Assert.Contains("Command Mode", visibleOutput);
+            Assert.Contains("❯ /status", visibleOutput);
+        }
+        [Fact]
+        public void UiHost_RendersKeyboardCommandInputCompletionCandidates()
+        {
+            var uiHost = new UiHost();
+            uiHost.SetPanel(new LiveDisplayPanel(
+                Workspace(),
+                "ScenarioAnalyzer",
+                "workspace",
+                "整页布局",
+                new Panel("CommandInputBody").Expand(),
+                DateTimeOffset.Now,
+                FullBleed: true));
+            ((IKeyboardOverlaySink)uiHost).ShowCommandInput(new KeyboardCommandInput(
+                "/plugin l",
+                ["/plugin list", "/plugin load"]));
+
+            var output = Render(uiHost, width: 80, height: 16);
+
+            Assert.Contains("CommandInputBody", output);
+            Assert.Contains("/plugin list", output);
+            Assert.Contains("/plugin load", output);
+            Assert.Contains("❯ /plugin l", output);
+            Assert.Contains("Command Mode", output);
+        }
+
+        [Fact]
+        public void UiHost_CompleteCommandReturnsWorkspaceAndPluginCandidates()
+        {
+            var uiHost = new UiHost();
+            uiHost.CreateWorkspace("First");
+            uiHost.CreateWorkspace("Second");
+            Render(uiHost);
+            PluginManager.Metadatas["CompletionPlugin"] = new PluginManager.PluginMetadata(
+                "CompletionPlugin.dll",
+                "CompletionPlugin",
+                loadInHost: false,
+                shared: [],
+                isFromZip: false);
+            try
+            {
+                Assert.Equal(["/workspace switch Second"], uiHost.CompleteCommand("/workspace switch S"));
+                Assert.Equal(["/plugin load CompletionPlugin"], uiHost.CompleteCommand("/plugin load C"));
+            }
+            finally
+            {
+                PluginManager.Metadatas.Remove("CompletionPlugin");
+            }
         }
 
         [Fact]
@@ -693,10 +1272,10 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public void RenderSnapshot_RendersMultipleNonFullBleedPanelsWithLogs()
+        public void RenderSnapshot_RendersMultipleNonFullBleedPanelsWithoutLogsPanel()
         {
             var uiHost = new UiHost();
-            var workspace = Workspace("panel-lab", "Panel Lab");
+            var workspace = Workspace("Panel Lab");
             uiHost.SetPanel(new LiveDisplayPanel(
                 workspace,
                 "PanelLabA",
@@ -725,6 +1304,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.Contains("PanelLabB", output);
             Assert.Contains("StableSummary", output);
             Assert.Contains("DynamicDetail", output);
+            Assert.DoesNotContain("Logs", output);
             Assert.Contains("PanelLabLog", output);
         }
 
@@ -732,7 +1312,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         public void RenderSnapshot_FallsBackToPlainTextForInvalidMarkupLog()
         {
             var uiHost = new UiHost();
-            var workspace = Workspace("panel-lab", "Panel Lab");
+            var workspace = Workspace("Panel Lab");
             uiHost.SetPanel(new LiveDisplayPanel(
                 workspace,
                 "A",
@@ -840,6 +1420,16 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         static string StripAnsi(string value) => Regex.Replace(value, @"\x1B\[[0-9;]*[A-Za-z]", "");
+        static string VisibleTail(string value, int height)
+        {
+            var lines = value
+                .Replace("\r\n", "\n")
+                .Split('\n')
+                .Select(StripAnsi)
+                .Select(line => line.TrimEnd())
+                .ToArray();
+            return string.Join('\n', lines.TakeLast(height));
+        }
 
         sealed class FixedSizeConsoleOutput(TextWriter writer, int width, int height, bool isTerminal = false) : IAnsiConsoleOutput
         {

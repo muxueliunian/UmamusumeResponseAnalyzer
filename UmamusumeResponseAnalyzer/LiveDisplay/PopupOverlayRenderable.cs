@@ -48,10 +48,11 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
             var overlayBottom = placement.Top + overlayLines.Count;
             var overlayRight = placement.Left + overlayWidth;
-            var baseLines = Segment.SplitLines(content.Render(options, maxWidth), maxWidth, options.Height);
+            var renderHeight = options.Height ?? GetFallbackHeight(maxWidth, overlayLines.Count, placement);
+            var baseLines = Segment.SplitLines(content.Render(options, maxWidth), maxWidth, renderHeight);
             var lineCount = Math.Max(baseLines.Count, overlayBottom);
-            if (options.Height.HasValue)
-                lineCount = Math.Min(lineCount, options.Height.Value);
+            if (renderHeight.HasValue)
+                lineCount = Math.Min(lineCount, renderHeight.Value);
 
             for (var lineIndex = 0; lineIndex < lineCount; lineIndex++)
             {
@@ -89,6 +90,8 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         }
 
         protected abstract bool TryGetPlacement(int maxWidth, int? maxHeight, int overlayHeight, out OverlayPlacement placement);
+
+        protected virtual int? GetFallbackHeight(int maxWidth, int overlayHeight, OverlayPlacement placement) => null;
 
         protected static IReadOnlyList<IReadOnlyList<Segment>> PlainLines(IEnumerable<string> lines)
         {

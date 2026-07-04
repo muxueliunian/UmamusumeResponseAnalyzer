@@ -15,9 +15,14 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         public BootstrapWorkspace(UiHost uiHost)
         {
             this.uiHost = uiHost;
-            Workspace = uiHost.CreateWorkspace("bootstrap", "启动");
+            Workspace = uiHost.CreateWorkspace("启动");
             uiHost.BindWorkspaceHotkey(Workspace, ConsoleKey.B, ConsoleModifiers.Control, "启动信息");
             Refresh();
+            uiHost.RemoveWorkspaceWhenAnotherRegisters(Workspace, () =>
+            {
+                if (LiveDisplayConsole.DefaultLogWorkspace == Workspace)
+                    LiveDisplayConsole.DefaultLogWorkspace = null;
+            });
         }
 
         public LiveDisplayWorkspace Workspace { get; }

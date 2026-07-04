@@ -32,17 +32,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             if (TryGetFullBleedPanel(state.Panels, state.ActiveWorkspace, out var fullBleedPanel))
                 return fullBleedPanel.Content;
 
-            var body = width >= 120 && height >= 28
-                ? new Layout("Body").SplitColumns(
-                    new Layout("Main").Ratio(3),
-                    new Layout("Side").Ratio(2))
-                : new Layout("Body").SplitRows(
-                    new Layout("Main").Ratio(3),
-                    new Layout("Side").Ratio(2));
-
-            body["Main"].Update(BuildWorkspacePanels(state.Panels, state.ActiveWorkspace, state.ShortcutResolver));
-            body["Side"].Update(BuildSidePanel(state.Logs, state.ActiveWorkspace));
-            return body;
+            return BuildWorkspaceBody(state.Panels, state.Logs, state.ActiveWorkspace, state.ShortcutResolver);
         }
 
         static bool TryGetFullBleedPanel(
@@ -96,24 +86,21 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             return new Rows(renderables);
         }
 
-        static IRenderable BuildSidePanel(IReadOnlyList<LiveDisplayLogLine> logs, LiveDisplayWorkspace workspace)
+        static IRenderable BuildWorkspaceBody(
+            IReadOnlyCollection<LiveDisplayPanel> panels,
+            IReadOnlyList<LiveDisplayLogLine> logs,
+            LiveDisplayWorkspace workspace,
+            Func<LiveDisplayWorkspace, string> shortcutResolver)
         {
+            var workspacePanels = BuildWorkspacePanels(panels, workspace, shortcutResolver);
             var workspaceLogs = logs
                 .Where(x => x.Workspace is null || x.Workspace == workspace || x.Severity >= LiveDisplaySeverity.Warning)
-                .TakeLast(14);
-            return BuildLogPanel(workspaceLogs);
-        }
+                .TakeLast(14)
+                .ToArray();
 
-        static IRenderable BuildLogPanel(IEnumerable<LiveDisplayLogLine> source)
-        {
-            var rows = source.Select(BuildLogRow).ToList();
-
-            if (rows.Count == 0)
-                rows.Add(new Markup("[grey]暂无日志。[/]"));
-
-            return new Panel(new Rows([.. rows]))
-                .Header("Logs")
-                .BorderColor(Color.Grey35);
+            return workspaceLogs.Length == 0
+                ? workspacePanels
+                : new Rows([workspacePanels, BuildBareLogs(workspaceLogs)]);
         }
 
         // 无 workspace 时，日志直接裸露显示（无面板边框/标题），就像普通控制台输出。

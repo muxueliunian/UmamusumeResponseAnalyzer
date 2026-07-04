@@ -30,6 +30,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         public HotReloadTests()
         {
             SeedConfig(); // 触碰 PluginManager/LoadIntoContext 会读 Config.Repository.Targets，先注入一个 YamlConfig
+            ResetPluginState();
 
             _originalCwd = Directory.GetCurrentDirectory();
             _tempDir = Path.Combine(Path.GetTempPath(), "ura-hotreload-" + Guid.NewGuid().ToString("N"));
@@ -41,6 +42,7 @@ namespace UmamusumeResponseAnalyzer.Tests
 
         public void Dispose()
         {
+            ResetPluginState();
             Directory.SetCurrentDirectory(_originalCwd);
             try { Directory.Delete(_tempDir, recursive: true); } catch { /* 进程仍持有内存中的程序集，文件残留无妨 */ }
         }
@@ -210,6 +212,89 @@ namespace UmamusumeResponseAnalyzer.Tests
                 "server 未启动时重载触发了 Initialize —— 会与 Program.Main 的启动初始化重复,导致双初始化");
         }
 
+        [Fact]
+        public void RuntimeLifecycle_LoadUnloadReload_UsesInternalNameAndKeepsPluginFiles()
+        {
+            var pluginsDir = Path.Combine(_tempDir, "Plugins");
+            var standalonePath = Path.Combine(pluginsDir, "RuntimeStandalone.dll");
+            PluginCompiler.Compile(
+                PluginSource("RuntimeStandalone", "runtime-standalone", displayName: "显示名"),
+                "RuntimeStandalone",
+                standalonePath);
+            PluginCompiler.Compile(
+                PluginSource("RuntimeAnchor", "runtime-anchor"),
+                "RuntimeAnchor",
+                Path.Combine(pluginsDir, "RuntimeAnchor.dll"));
+            PluginCompiler.Compile(
+                PluginSource("RuntimeMember", "runtime-member", sharedWith: "RuntimeAnchor"),
+                "RuntimeMember",
+                Path.Combine(pluginsDir, "RuntimeMember.dll"));
+            PluginManager.Init();
+
+            Assert.Contains(PluginManager.SnapshotPluginStatuses(), x =>
+                x.InternalName == "RuntimeStandalone" && x.DisplayName == "显示名" && x.IsLoaded);
+            Dispatch();
+            var initialLog = File.ReadAllText(_logPath);
+            Assert.Contains("runtime-standalone:", initialLog);
+            Assert.Contains("runtime-anchor:", initialLog);
+            Assert.Contains("runtime-member:", initialLog);
+
+            Assert.Empty(PluginManager.UnloadPlugins("runtimestandalone"));
+
+            Assert.True(File.Exists(standalonePath));
+            Assert.DoesNotContain(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeStandalone");
+            Assert.Contains(PluginManager.SnapshotPluginStatuses(), x =>
+                x.InternalName == "RuntimeStandalone" && x.IsAvailable && !x.IsLoaded);
+            File.Delete(_logPath);
+            Dispatch();
+            var unloadedLog = File.ReadAllText(_logPath);
+            Assert.DoesNotContain("runtime-standalone:", unloadedLog);
+            Assert.Contains("runtime-anchor:", unloadedLog);
+            Assert.Contains("runtime-member:", unloadedLog);
+
+            Assert.Empty(PluginManager.LoadPlugins("RuntimeStandalone"));
+
+            File.Delete(_logPath);
+            Dispatch();
+            var reloadedLog = File.ReadAllText(_logPath);
+            Assert.Contains("runtime-standalone:", reloadedLog);
+
+            Assert.Empty(PluginManager.UnloadPlugins("RuntimeMember"));
+
+            Assert.DoesNotContain(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeAnchor");
+            Assert.DoesNotContain(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeMember");
+            File.Delete(_logPath);
+            Dispatch();
+            var groupUnloadedLog = File.ReadAllText(_logPath);
+            Assert.Contains("runtime-standalone:", groupUnloadedLog);
+            Assert.DoesNotContain("runtime-anchor:", groupUnloadedLog);
+            Assert.DoesNotContain("runtime-member:", groupUnloadedLog);
+
+            Assert.Empty(PluginManager.LoadPlugins("RuntimeMember"));
+
+            Assert.Contains(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeAnchor");
+            Assert.Contains(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeMember");
+        }
+
+        [Fact]
+        public void RuntimeLifecycle_LoadInHostContextUnloadAndReloadNeedRestart()
+        {
+            var pluginsDir = Path.Combine(_tempDir, "Plugins");
+            PluginCompiler.Compile(
+                PluginSource("RuntimeHostPlugin", "runtime-host", loadInHost: true),
+                "RuntimeHostPlugin",
+                Path.Combine(pluginsDir, "RuntimeHostPlugin.dll"));
+            PluginManager.Init();
+
+            Assert.Contains(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeHostPlugin");
+
+            Assert.Contains("RuntimeHostPlugin", PluginManager.UnloadPlugins("RuntimeHostPlugin"));
+            Assert.Contains(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeHostPlugin");
+
+            Assert.Contains("RuntimeHostPlugin", PluginManager.ReloadPlugins("RuntimeHostPlugin"));
+            Assert.Contains(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeHostPlugin");
+        }
+
         /// <summary>
         /// 编译并加载 3 个插件 → dispatch → 把独立插件升级到 v2 并重载、把共享组重载，返回两个旧 ALC 的弱引用。
         /// NoInlining：让本帧产生的所有指向旧 ALC 的临时引用随返回而释放（测 collectible ALC 卸载的标准手法）。
@@ -322,6 +407,25 @@ namespace UmamusumeResponseAnalyzer.Tests
                     Language = new(),
                     Misc = new(),
                 });
+        }
+
+        static void ResetPluginState()
+        {
+            PluginManager.RequestAnalyzerMethods.Clear();
+            PluginManager.ResponseAnalyzerMethods.Clear();
+            PluginManager.ClearHostEventSubscriptions();
+            PluginManager.Metadatas.Clear();
+            PluginManager.AssemblyMetadatas.Clear();
+            PluginManager.FailedPlugins.Clear();
+            PluginManager.ContextGroups.Clear();
+            foreach (var context in PluginManager.Contexts.Values)
+                context.Unload();
+            PluginManager.Contexts.Clear();
+            PluginManager.AssemblyMap.Clear();
+            PluginManager.Assemblies.Clear();
+            foreach (var plugin in PluginManager.LoadedPlugins.ToList())
+                KeyboardManager.UnregisterByOwner(plugin);
+            PluginManager.LoadedPlugins.Clear();
         }
     }
 }

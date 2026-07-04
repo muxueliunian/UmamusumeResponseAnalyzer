@@ -64,8 +64,10 @@ namespace UmamusumeResponseAnalyzer.Entities
             if (!IsNpc) // 自己带的S卡
             {
                 CardId = turn.SupportCards[Position];
-                Name = Database.Names.GetSupportCard(CardId).Nickname.EscapeMarkup();
-                if (Name.Contains("[友]")) // 友人单独标绿
+                var supportCard = Database.Names.GetSupportCard(CardId);
+                var isFriendSupportCard = supportCard.Type == 0;
+                Name = supportCard.Nickname.EscapeMarkup();
+                if (isFriendSupportCard) // 友人单独标绿
                 {
                     Priority = PartnerPriority.友人;
                     NameColor = $"[green]";
@@ -77,15 +79,8 @@ namespace UmamusumeResponseAnalyzer.Entities
                     NameColor = "[yellow]";
                 }
                 //在得意位置上
-                Shining = Friendship >= 80 &&
-                    Name.Contains((toTrainIdDictionary ?? ToTrainId)[command.command_id] switch
-                    {
-                        101 => "[速]",
-                        105 => "[耐]",
-                        102 => "[力]",
-                        103 => "[根]",
-                        106 => "[智]",
-                    });
+                Shining = Friendship >= 80
+                    && supportCard.CanTriggerFriendshipTraining((toTrainIdDictionary ?? ToTrainId)[command.command_id]);
 
                 if ((CardId == 30137 && turn.GetCommonResponse().chara_info.chara_effect_id_array.Any(x => x == 102)) || //神团
                 (CardId == 30067 && turn.GetCommonResponse().chara_info.chara_effect_id_array.Any(x => x == 101)) || //皇团
@@ -98,7 +93,7 @@ namespace UmamusumeResponseAnalyzer.Entities
 
                 if (Shining)
                 {
-                    if (Name.Contains("[友]"))
+                    if (isFriendSupportCard)
                     {
                         Priority = PartnerPriority.友人;
                         NameColor = $"[#80ff00]";

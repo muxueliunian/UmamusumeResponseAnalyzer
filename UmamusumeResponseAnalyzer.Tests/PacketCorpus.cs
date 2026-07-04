@@ -47,6 +47,10 @@ namespace UmamusumeResponseAnalyzer.Tests
             [.. ResponseFiles.Select(TryCreateResponseEndpointPacket).OfType<EndpointPacket>()]);
         public static IReadOnlyList<EndpointPacket> ResponseEndpointPackets => _responseEndpointPackets.Value;
 
+        static readonly Lazy<IReadOnlyList<EndpointPacket>> _requestEndpointPackets = new(() =>
+            [.. RequestFiles.Select(TryCreateRequestEndpointPacket).OfType<EndpointPacket>()]);
+        public static IReadOnlyList<EndpointPacket> RequestEndpointPackets => _requestEndpointPackets.Value;
+
         static readonly Lazy<IReadOnlyList<UnresolvedEndpointPacket>> _unresolvedResponseEndpointPackets = new(() =>
             [.. ResponseFiles.Select(TryCreateUnresolvedResponseEndpointPacket).OfType<UnresolvedEndpointPacket>()]);
         public static IReadOnlyList<UnresolvedEndpointPacket> UnresolvedResponseEndpointPackets => _unresolvedResponseEndpointPackets.Value;
@@ -86,6 +90,10 @@ namespace UmamusumeResponseAnalyzer.Tests
             => ResponseEndpointPackets.Count == 0
                 ? [[null, null]]
                 : ResponseEndpointPackets.Select(x => new object?[] { x.Path, x.Endpoint.ResponseType });
+        public static IEnumerable<object?[]> RequestDescriptorCases()
+            => RequestEndpointPackets.Count == 0
+                ? [[null, null]]
+                : RequestEndpointPackets.Select(x => new object?[] { x.Path, x.Endpoint.RequestType });
 
         static IEnumerable<object?[]> Wrap(IReadOnlyList<string> files) =>
             files.Count == 0 ? [[null]] : files.Select(f => new object?[] { f });
@@ -101,6 +109,21 @@ namespace UmamusumeResponseAnalyzer.Tests
         static EndpointPacket? TryCreateResponseEndpointPacket(string path)
         {
             if (!TryGetCanonicalUrl(path, out var kind, out var canonicalUrl) || kind != AnalyzerKind.Response)
+                return null;
+
+            try
+            {
+                return new(path, Server.ResolveEndpoint(canonicalUrl));
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        static EndpointPacket? TryCreateRequestEndpointPacket(string path)
+        {
+            if (!TryGetCanonicalUrl(path, out var kind, out var canonicalUrl) || kind != AnalyzerKind.Request)
                 return null;
 
             try

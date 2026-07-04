@@ -597,7 +597,8 @@ namespace UmamusumeResponseAnalyzer.Tests
 
         sealed class FakeLiveDisplayOutput : ILiveDisplayOutput
         {
-            public LiveDisplayWorkspace CreateWorkspace(string id, string title) => LiveDisplayWorkspace.Create(id, title);
+            public LiveDisplayWorkspace? CurrentWorkspace => null;
+            public LiveDisplayWorkspace CreateWorkspace(string title) => LiveDisplayWorkspace.Create(title);
             public void SwitchWorkspace(LiveDisplayWorkspace workspace) { }
             public void BindWorkspaceHotkey(LiveDisplayWorkspace workspace, ConsoleKey key, ConsoleModifiers modifiers = 0, string? description = null) { }
             public void SetPanel(LiveDisplayWorkspace workspace, string key, string title, Spectre.Console.Rendering.IRenderable content, bool fullBleed = false) { }

@@ -2,7 +2,6 @@
 using Gallop.Endpoints;
 using Newtonsoft.Json.Linq;
 using System.Reflection;
-using System.Runtime.ExceptionServices;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using UmamusumeResponseAnalyzer.Plugin;
 using WatsonWebserver.Core;
@@ -14,12 +13,14 @@ namespace UmamusumeResponseAnalyzer
     internal sealed class AnalyzerDispatchContext(
         AnalyzerKind kind,
         GameEndpointDescriptor descriptor,
-        byte[] payload)
+        byte[] payload,
+        GameHttpHeaders headers)
     {
         object? dto;
         bool dtoInitialized;
 
         public byte[] Payload { get; } = payload;
+        public GameHttpHeaders Headers { get; } = headers;
 
         public object GetDto()
         {
@@ -52,6 +53,12 @@ namespace UmamusumeResponseAnalyzer
     public static class Server
     {
         internal const string CanonicalUrlHeaderName = "X-Hachimi-Game-Url";
+        internal const string SidHeaderName = "X-Hachimi-sid";
+        internal const string AppVerHeaderName = "X-Hachimi-app-ver";
+        internal const string ResVerHeaderName = "X-Hachimi-res-ver";
+        internal const string ViewerIdHeaderName = "X-Hachimi-viewerid";
+        internal const string DeviceHeaderName = "X-Hachimi-device";
+        internal const string DeviceSubtypeHeaderName = "X-Hachimi-device-subtype";
         internal static WebserverLite Instance = new(new WebserverSettings(Config.Core.ListenAddress, Config.Core.ListenPort), (ctx) => { return ctx.Response.Send(string.Empty); });
         public static bool IsRunning => Instance.IsListening;
         internal static void Start()
@@ -60,14 +67,16 @@ namespace UmamusumeResponseAnalyzer
             {
                 var buffer = ctx.Request.DataAsBytes;
                 var canonicalUrl = ReadCanonicalUrl(ctx);
-                await DispatchResponse(canonicalUrl, buffer);
+                var headers = ReadGameHttpHeaders(ctx);
+                await DispatchResponse(canonicalUrl, buffer, headers);
                 await ctx.Response.Send(string.Empty);
             });
             Instance.Routes.PreAuthentication.Static.Add(WatsonWebserver.Core.HttpMethod.POST, "/notify/request", async (ctx) =>
             {
                 var buffer = ctx.Request.DataAsBytes;
                 var canonicalUrl = ReadCanonicalUrl(ctx);
-                await DispatchRequest(canonicalUrl, buffer);
+                var headers = ReadGameHttpHeaders(ctx);
+                await DispatchRequest(canonicalUrl, buffer, headers);
                 await ctx.Response.Send(string.Empty);
             });
             Instance.Routes.PreAuthentication.Static.Add(WatsonWebserver.Core.HttpMethod.GET, "/notify/ping", (ctx) =>
@@ -87,6 +96,15 @@ namespace UmamusumeResponseAnalyzer
                 throw new InvalidOperationException($"缺少 canonical URL header: {CanonicalUrlHeaderName}");
             return canonicalUrl;
         }
+
+        internal static GameHttpHeaders ReadGameHttpHeaders(HttpContextBase ctx)
+            => new(
+                ctx.Request.Headers[SidHeaderName],
+                ctx.Request.Headers[AppVerHeaderName],
+                ctx.Request.Headers[ResVerHeaderName],
+                ctx.Request.Headers[ViewerIdHeaderName],
+                ctx.Request.Headers[DeviceHeaderName],
+                ctx.Request.Headers[DeviceSubtypeHeaderName]);
 
         internal static GameEndpointDescriptor ResolveEndpoint(string canonicalUrl)
         {
@@ -115,13 +133,13 @@ namespace UmamusumeResponseAnalyzer
             return value;
         }
 
-        internal static ValueTask DispatchRequest(string canonicalUrl, byte[] buffer)
-            => DispatchPacket(AnalyzerKind.Request, canonicalUrl, buffer);
+        internal static ValueTask DispatchRequest(string canonicalUrl, byte[] buffer, GameHttpHeaders? headers = null)
+            => DispatchPacket(AnalyzerKind.Request, canonicalUrl, buffer, headers ?? GameHttpHeaders.Empty);
 
-        internal static ValueTask DispatchResponse(string canonicalUrl, byte[] buffer)
-            => DispatchPacket(AnalyzerKind.Response, canonicalUrl, buffer);
+        internal static ValueTask DispatchResponse(string canonicalUrl, byte[] buffer, GameHttpHeaders? headers = null)
+            => DispatchPacket(AnalyzerKind.Response, canonicalUrl, buffer, headers ?? GameHttpHeaders.Empty);
 
-        static async ValueTask DispatchPacket(AnalyzerKind kind, string canonicalUrl, byte[] buffer)
+        static async ValueTask DispatchPacket(AnalyzerKind kind, string canonicalUrl, byte[] buffer, GameHttpHeaders headers)
         {
             try
             {
@@ -132,7 +150,7 @@ namespace UmamusumeResponseAnalyzer
                 PluginManager.EnterDispatch();
                 try
                 {
-                    await DispatchPacketLocked(kind, descriptor, buffer);
+                    await DispatchPacketLocked(kind, descriptor, buffer, headers);
                 }
                 finally
                 {
@@ -177,13 +195,13 @@ namespace UmamusumeResponseAnalyzer
 #endif
         }
 
-        static async ValueTask DispatchPacketLocked(AnalyzerKind kind, GameEndpointDescriptor descriptor, byte[] buffer)
+        static async ValueTask DispatchPacketLocked(AnalyzerKind kind, GameEndpointDescriptor descriptor, byte[] buffer, GameHttpHeaders headers)
         {
             var registrations = PluginManager.SnapshotAnalyzerRegistrations(kind, descriptor.EndpointType);
             if (registrations.Count == 0)
                 return;
 
-            var context = new AnalyzerDispatchContext(kind, descriptor, buffer);
+            var context = new AnalyzerDispatchContext(kind, descriptor, buffer, headers);
             foreach (var registration in registrations)
                 await InvokeAnalyzer(kind, registration, context);
         }
@@ -201,8 +219,6 @@ namespace UmamusumeResponseAnalyzer
                 var label = kind == AnalyzerKind.Request ? "请求" : "响应";
                 LiveDisplayConsole.Notify("Plugin", $"{label}分析插件处理失败: {root.Message}", LiveDisplaySeverity.Error);
                 LiveDisplayConsole.LogException(registration.Method?.DeclaringType?.Name ?? registration.Source, root);
-                ExceptionDispatchInfo.Capture(root).Throw();
-                throw;
             }
         }
 

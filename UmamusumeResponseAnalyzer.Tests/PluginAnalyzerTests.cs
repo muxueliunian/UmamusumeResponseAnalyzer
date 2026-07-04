@@ -18,6 +18,13 @@ namespace UmamusumeResponseAnalyzer.Tests
         const string AccountIndexPath = "/umamusume/account/index";
         const string AccountIndexAbsoluteUrl = "https://example.test/umamusume/account/index?viewer_id=1#fragment";
         const string AccountIndexUrlWithQuery = AccountIndexPath + "?viewer_id=1";
+        static GameHttpHeaders TestHeaders => new(
+            "sid-1",
+            "app-2026.07.03",
+            "res-2026.07.03",
+            "viewer-1",
+            "android",
+            "tablet");
 
         public PluginAnalyzerTests()
         {
@@ -102,6 +109,18 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
+        public void RegisterMethods_FailsFastForInvalidAnalyzerHeadersParameterType()
+        {
+            var plugin = new WrongHeadersParameterPlugin();
+
+            var ex = Assert.Throws<InvalidOperationException>(() => PluginManager.RegisterMethods(plugin));
+
+            Assert.Contains(nameof(WrongHeadersParameterPlugin.OnResponse), ex.Message);
+            Assert.Contains(nameof(GameHttpHeaders), ex.Message);
+            Assert.Contains("ValueTask analyzer(TPayload payload, GameHttpHeaders headers)", ex.Message);
+        }
+
+        [Fact]
         public void RegisterMethods_FailsFastForEndpointTypeMissingFromCatalog()
         {
             var plugin = new UnknownEndpointPlugin();
@@ -170,14 +189,47 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public async Task DispatchResponse_DeserializesDtoAtDtoAnalyzerExecutionPoint()
+        public async Task DispatchRequest_DeliversHeadersToAttributeRawAnalyzerSecondParameter()
+        {
+            var plugin = new RawHeadersDispatchPlugin();
+            PluginManager.RegisterMethods(plugin);
+            var payload = MessagePackSerializer.Serialize(new DataLinkIndexRequest());
+            var headers = TestHeaders;
+
+            await Server.DispatchRequest(AccountIndexPath, payload, headers);
+
+            Assert.Equal(payload, plugin.LastPayload);
+            Assert.Same(headers, plugin.LastHeaders);
+        }
+
+        [Fact]
+        public async Task DispatchResponse_DeliversHeadersToAttributeDtoAnalyzerSecondParameter()
+        {
+            var plugin = new DtoHeadersDispatchPlugin();
+            PluginManager.RegisterMethods(plugin);
+            var payload = MessagePackSerializer.Serialize(new DataLinkIndexResponse
+            {
+                data = new DataLinkIndexResponse.CommonResponse
+                {
+                    open_date = "2026-07-03",
+                },
+            });
+            var headers = TestHeaders;
+
+            await Server.DispatchResponse(AccountIndexPath, payload, headers);
+
+            Assert.Equal("2026-07-03", plugin.LastResponse?.data.open_date);
+            Assert.Same(headers, plugin.LastHeaders);
+        }
+
+        [Fact]
+        public async Task DispatchResponse_IsolatesDtoDeserializationAtDtoAnalyzerExecutionPoint()
         {
             var plugin = new ResponseDispatchPlugin();
             PluginManager.RegisterMethods(plugin);
 
-            var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () => await Server.DispatchResponse(AccountIndexPath, [0xC1]));
+            await Server.DispatchResponse(AccountIndexPath, [0xC1]);
 
-            Assert.Contains("Gallop DTO", ex.Message);
             Assert.Equal(0, plugin.DtoCalls);
             Assert.Equal(1, plugin.RawCalls);
         }
@@ -268,15 +320,18 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public async Task DispatchResponse_RethrowsAnalyzerException()
+        public async Task DispatchResponse_IsolatesAnalyzerExceptionAndContinues()
         {
-            var plugin = new ThrowingResponsePlugin();
-            PluginManager.RegisterMethods(plugin);
+            var throwingPlugin = new ThrowingResponsePlugin();
+            var nextPlugin = new ResponseDispatchPlugin();
+            PluginManager.RegisterMethods(throwingPlugin);
+            PluginManager.RegisterMethods(nextPlugin);
             var payload = MessagePackSerializer.Serialize(new DataLinkIndexResponse());
 
-            var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () => await Server.DispatchResponse(AccountIndexPath, payload));
+            await Server.DispatchResponse(AccountIndexPath, payload);
 
-            Assert.Equal("analyzer failed", ex.Message);
+            Assert.Equal(1, nextPlugin.RawCalls);
+            Assert.Equal(1, nextPlugin.DtoCalls);
         }
 
         [Fact]
@@ -339,6 +394,28 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
+        public async Task DispatchRequest_DeliversRequestCorpusDtos()
+        {
+            Assert.SkipUnless(PacketCorpus.RequestEndpointPackets.Count > 0, "无带 canonical URL 的请求语料");
+
+            var plugin = new CatalogDispatchPlugin();
+            PluginManager.InitializePlugin(plugin);
+
+            foreach (var packet in PacketCorpus.RequestEndpointPackets)
+            {
+                Assert.True(PacketCorpus.TryGetCanonicalUrl(packet.Path, out var kind, out var canonicalUrl));
+                Assert.Equal(AnalyzerKind.Request, kind);
+
+                await Server.DispatchRequest(canonicalUrl, PacketCorpus.LoadBytes(packet.Path));
+
+                Assert.True(
+                    plugin.RequestDtos.Remove(packet.Endpoint.EndpointType, out var receivedRequest),
+                    $"Request analyzer was not called for endpoint {packet.Endpoint.Path} ({packet.Endpoint.EndpointType.FullName}).");
+                Assert.IsType(packet.Endpoint.RequestType, receivedRequest);
+            }
+        }
+
+        [Fact]
         public async Task ProgrammaticRegistry_RegistersRawAndDtoAnalyzers()
         {
             var plugin = new ProgrammaticAnalyzerPlugin();
@@ -356,6 +433,41 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.Equal(["raw", "dto"], plugin.CallOrder);
             Assert.Equal(payload, plugin.LastPayload);
             Assert.Equal("2026-07-01", plugin.LastResponse?.data.open_date);
+        }
+
+        [Fact]
+        public async Task ProgrammaticRegistry_DeliversHeadersToRawAndDtoAnalyzerOverloads()
+        {
+            var plugin = new ProgrammaticHeadersAnalyzerPlugin();
+            PluginManager.InitializePlugin(plugin);
+            var payload = MessagePackSerializer.Serialize(new DataLinkIndexResponse
+            {
+                data = new DataLinkIndexResponse.CommonResponse
+                {
+                    open_date = "2026-07-03",
+                },
+            });
+            var headers = TestHeaders;
+
+            await Server.DispatchResponse(AccountIndexPath, payload, headers);
+
+            Assert.Equal(["raw", "dto"], plugin.CallOrder);
+            Assert.Equal(payload, plugin.LastPayload);
+            Assert.Equal("2026-07-03", plugin.LastResponse?.data.open_date);
+            Assert.Same(headers, plugin.LastRawHeaders);
+            Assert.Same(headers, plugin.LastDtoHeaders);
+        }
+
+        [Fact]
+        public async Task DispatchResponse_UsesEmptyHeadersWhenHeadersOmitted()
+        {
+            var plugin = new DtoHeadersDispatchPlugin();
+            PluginManager.RegisterMethods(plugin);
+            var payload = MessagePackSerializer.Serialize(new DataLinkIndexResponse());
+
+            await Server.DispatchResponse(AccountIndexPath, payload);
+
+            Assert.Same(GameHttpHeaders.Empty, plugin.LastHeaders);
         }
 
         [Fact]
@@ -690,6 +802,15 @@ namespace UmamusumeResponseAnalyzer.Tests
             }
         }
 
+        sealed class WrongHeadersParameterPlugin : TestPlugin
+        {
+            [ResponseAnalyzer<GameApi.Account.Index>]
+            public ValueTask OnResponse(DataLinkIndexResponse response, string headers)
+            {
+                return ValueTask.CompletedTask;
+            }
+        }
+
         sealed class UnknownEndpointPlugin : TestPlugin
         {
             [UnknownAnalyzer]
@@ -799,6 +920,34 @@ namespace UmamusumeResponseAnalyzer.Tests
             }
         }
 
+        sealed class RawHeadersDispatchPlugin : TestPlugin
+        {
+            public byte[]? LastPayload { get; private set; }
+            public GameHttpHeaders? LastHeaders { get; private set; }
+
+            [RequestAnalyzer<GameApi.Account.Index>]
+            public ValueTask OnRaw(byte[] payload, GameHttpHeaders headers)
+            {
+                LastPayload = payload;
+                LastHeaders = headers;
+                return ValueTask.CompletedTask;
+            }
+        }
+
+        sealed class DtoHeadersDispatchPlugin : TestPlugin
+        {
+            public DataLinkIndexResponse? LastResponse { get; private set; }
+            public GameHttpHeaders? LastHeaders { get; private set; }
+
+            [ResponseAnalyzer<GameApi.Account.Index>]
+            public ValueTask OnDto(DataLinkIndexResponse response, GameHttpHeaders headers)
+            {
+                LastResponse = response;
+                LastHeaders = headers;
+                return ValueTask.CompletedTask;
+            }
+        }
+
         sealed class ProgrammaticAnalyzerPlugin : TestPlugin
         {
             public byte[]? LastPayload { get; private set; }
@@ -817,6 +966,34 @@ namespace UmamusumeResponseAnalyzer.Tests
                 context.Analyzers.RegisterResponse<GameApi.Account.Index, DataLinkIndexResponse>(response =>
                 {
                     LastResponse = response;
+                    CallOrder.Add("dto");
+                    return ValueTask.CompletedTask;
+                }, 20);
+            }
+        }
+
+        sealed class ProgrammaticHeadersAnalyzerPlugin : TestPlugin
+        {
+            public byte[]? LastPayload { get; private set; }
+            public DataLinkIndexResponse? LastResponse { get; private set; }
+            public GameHttpHeaders? LastRawHeaders { get; private set; }
+            public GameHttpHeaders? LastDtoHeaders { get; private set; }
+            public List<string> CallOrder { get; } = [];
+
+            public override void Initialize(IPluginContext context)
+            {
+                context.Analyzers.RegisterResponse<GameApi.Account.Index>((payload, headers) =>
+                {
+                    LastPayload = payload;
+                    LastRawHeaders = headers;
+                    CallOrder.Add("raw");
+                    return ValueTask.CompletedTask;
+                }, 10);
+
+                context.Analyzers.RegisterResponse<GameApi.Account.Index, DataLinkIndexResponse>((response, headers) =>
+                {
+                    LastResponse = response;
+                    LastDtoHeaders = headers;
                     CallOrder.Add("dto");
                     return ValueTask.CompletedTask;
                 }, 20);
@@ -901,7 +1078,8 @@ namespace UmamusumeResponseAnalyzer.Tests
 
         sealed class FakeLiveDisplayOutput : ILiveDisplayOutput
         {
-            public LiveDisplayWorkspace CreateWorkspace(string id, string title) => LiveDisplayWorkspace.Create(id, title);
+            public LiveDisplayWorkspace? CurrentWorkspace => null;
+            public LiveDisplayWorkspace CreateWorkspace(string title) => LiveDisplayWorkspace.Create(title);
             public void SwitchWorkspace(LiveDisplayWorkspace workspace) { }
             public void BindWorkspaceHotkey(LiveDisplayWorkspace workspace, ConsoleKey key, ConsoleModifiers modifiers = 0, string? description = null) { }
             public void SetPanel(LiveDisplayWorkspace workspace, string key, string title, IRenderable content, bool fullBleed = false) { }

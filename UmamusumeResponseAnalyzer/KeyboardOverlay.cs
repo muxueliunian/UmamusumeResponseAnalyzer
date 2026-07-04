@@ -11,10 +11,34 @@ namespace UmamusumeResponseAnalyzer
     internal sealed record KeyboardPopup(
         IReadOnlyList<KeyboardPopupLine> Lines,
         int ScrollOffset = 0,
-        DateTimeOffset? ExpiresAt = null);
+        DateTimeOffset? ExpiresAt = null,
+        KeyboardPopupSelection? Selection = null);
+
+    internal sealed record KeyboardPopupSelection(
+        IReadOnlyList<int> LineIndexes,
+        int SelectedIndex,
+        Func<int, Task> ConfirmAsync)
+    {
+        public int BoundedSelectedIndex => LineIndexes.Count == 0
+            ? -1
+            : Math.Clamp(SelectedIndex, 0, LineIndexes.Count - 1);
+
+        public int SelectedLineIndex => BoundedSelectedIndex < 0 ? -1 : LineIndexes[BoundedSelectedIndex];
+
+        public KeyboardPopupSelection Normalize()
+        {
+            var selectedIndex = BoundedSelectedIndex;
+            return selectedIndex == SelectedIndex ? this : this with { SelectedIndex = selectedIndex };
+        }
+    }
 
     internal sealed record KeyboardPopupLine(string Text, ConsoleColor Color, bool IsMarkup);
-    internal sealed record KeyboardCommandInput(string Text);
+    internal sealed record KeyboardCommandInput(string Text, IReadOnlyList<string> CompletionCandidates)
+    {
+        public KeyboardCommandInput(string text) : this(text, [])
+        {
+        }
+    }
 
     public sealed class KeyboardHandlerContext
     {
@@ -34,9 +58,9 @@ namespace UmamusumeResponseAnalyzer
             return this;
         }
 
-        internal KeyboardPopup ToPopup(int scrollOffset = 0)
+        internal KeyboardPopup ToPopup(int scrollOffset = 0, KeyboardPopupSelection? selection = null)
         {
-            return new KeyboardPopup(lines.ToArray(), scrollOffset);
+            return new KeyboardPopup(lines.ToArray(), scrollOffset, Selection: selection);
         }
     }
 }

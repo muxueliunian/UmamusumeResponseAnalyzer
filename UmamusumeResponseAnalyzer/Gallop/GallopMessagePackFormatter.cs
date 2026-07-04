@@ -33,7 +33,7 @@ internal sealed class GallopMessagePackFormatter<T> : IMessagePackFormatter<T?>
 
     public T? Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
     {
-        if (reader.TryReadNil())
+        if (reader.TryReadNil() || TryReadEmptyArrayAsNullObject(ref reader))
             return null;
 
         var metadata = GallopMessagePackTypeMetadata<T>.Instance;
@@ -57,6 +57,19 @@ internal sealed class GallopMessagePackFormatter<T> : IMessagePackFormatter<T?>
         }
 
         return value;
+    }
+
+    private static bool TryReadEmptyArrayAsNullObject(ref MessagePackReader reader)
+    {
+        if (reader.NextMessagePackType != MessagePackType.Array)
+            return false;
+
+        var peek = reader.CreatePeekReader();
+        if (peek.ReadArrayHeader() != 0)
+            return false;
+
+        reader = peek;
+        return true;
     }
 }
 
