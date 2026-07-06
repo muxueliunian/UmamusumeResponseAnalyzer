@@ -60,6 +60,7 @@ namespace UmamusumeResponseAnalyzer
         internal const string ViewerIdHeaderName = "X-Hachimi-viewerid";
         internal const string DeviceHeaderName = "X-Hachimi-device";
         internal const string DeviceSubtypeHeaderName = "X-Hachimi-device-subtype";
+        static readonly object DebugPacketCleanupLock = new();
         internal static WebserverLite Instance = new(new WebserverSettings(Config.Core.ListenAddress, Config.Core.ListenPort), (ctx) => { return ctx.Response.Send(string.Empty); });
         public static bool IsRunning => Instance.IsListening;
         internal static void Start()
@@ -180,30 +181,53 @@ namespace UmamusumeResponseAnalyzer
             if (!Config.Misc.SaveResponseForDebug)
                 return;
 
-            if (Directory.Exists("packets"))
-            {
-                foreach (var i in Directory.GetFiles("packets"))
-                {
-                    var fileInfo = new FileInfo(i);
-                    if (fileInfo.CreationTime.AddDays(1) < DateTime.Now)
-                        fileInfo.Delete();
-                }
-            }
-            else
-            {
+            if (!Directory.Exists("packets"))
                 Directory.CreateDirectory("packets");
-            }
+
+            CleanupOldDebugPackets();
+
             var suffix = kind == AnalyzerKind.Request ? "Q" : "R";
-            var fileBase = $"{DateTime.Now:yy-MM-dd HH-mm-ss-fff}{suffix}-{Uri.EscapeDataString(canonicalUrl)}";
-            File.WriteAllBytes($"packets/{fileBase}.msgpack", buffer);
+            var timestamp = DateTime.Now.ToString("yy-MM-dd HH-mm-ss-fff");
+            var endpointName = FormatDebugPacketEndpoint(canonicalUrl);
+            File.WriteAllBytes($"packets/{timestamp}{suffix}-{endpointName}.msgpack", buffer);
 #if DEBUG
             var debugJson = new JObject
             {
                 ["url"] = canonicalUrl,
                 ["payload"] = JToken.Parse(MessagePackSerializer.ConvertToJson(buffer)),
             };
-            File.WriteAllText($"packets/{fileBase}.json", debugJson.ToString(Newtonsoft.Json.Formatting.None));
+            File.WriteAllText($"packets/{timestamp}{suffix}.json", debugJson.ToString(Newtonsoft.Json.Formatting.None));
 #endif
+        }
+
+        static void CleanupOldDebugPackets()
+        {
+            lock (DebugPacketCleanupLock)
+            {
+                foreach (var i in Directory.GetFiles("packets"))
+                {
+                    var fileInfo = new FileInfo(i);
+                    if (fileInfo.CreationTime.AddDays(1) < DateTime.Now)
+                    {
+                        try
+                        {
+                            fileInfo.Delete();
+                        }
+                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                        {
+                            LiveDisplayConsole.Log("Server", $"debug packet 旧文件清理失败，已跳过 {Path.GetFileName(i)}: {ex.Message}", LiveDisplaySeverity.Warning);
+                        }
+                    }
+                }
+            }
+        }
+
+        static string FormatDebugPacketEndpoint(string canonicalUrl)
+        {
+            var endpointPath = ExtractEndpointPath(canonicalUrl);
+            if (endpointPath.StartsWith('/'))
+                endpointPath = endpointPath[1..];
+            return endpointPath.Replace('/', '-');
         }
 
         static async ValueTask DispatchPacketLocked(AnalyzerKind kind, GameEndpointDescriptor descriptor, byte[] buffer, GameHttpHeaders headers)

@@ -26,7 +26,7 @@ UmamusumeResponseAnalyzer 是本地运行的 TUI 宿主。它接收游戏请求/
 * 启动后按 `/` 或 `Enter` 打开命令输入栏；内置命令需以 `/` 开头。命令输入栏支持 `Tab` 补全，`Up` / `Down` 浏览当前进程内提交过的命令。`/workspace` 或 `/workspace switch` 打开 workspace 选择器，`/workspace switch <title>` 直接切换，`/workspace list` 列出 workspace。`/plugin` 或 `/plugin list` 列出插件运行期状态，`/plugin load|unload|reload <InternalName>` 只改变当前进程内加载状态，不安装、不删除插件文件、不写禁用配置。插件更新 workspace panel 时，LiveDisplay 默认会切到该 workspace。按 `Ctrl+B` 查看启动信息，按 `P` 查看已加载插件列表，按 `Ctrl+C` 退出程序。
 * 程序启动后会检查已加载插件是否有新版本；发现更新时只通知，不自动安装。更新插件需要进入 `插件仓库` 手动选择。
 * 更新数据文件时会先写入临时文件，下载成功后替换目标文件；失败时清理临时文件并保留已有文件。
-* 开启 debug packet 保存后，请求写为 `Q`、响应写为 `R` 的 `.msgpack` 文件，文件名包含 canonical URL；`DEBUG` 构建额外写 `.json`。`packets/` 中超过一天的旧文件会在下次保存时清理。
+* 开启 debug packet 保存后，请求写为 `Q`、响应写为 `R` 的 `.msgpack` 文件，文件名包含 API endpoint path（`/` 写为 `-`）；`DEBUG` 构建额外写 `.json`，文件名只包含时间戳和 `Q`/`R`，完整 canonical URL 写在 JSON 内容中。`packets/` 中超过一天的旧文件会在下次保存时清理，单个旧文件清理失败不会中断当前请求/响应分析。
 
 # 检查安装 Checking
 

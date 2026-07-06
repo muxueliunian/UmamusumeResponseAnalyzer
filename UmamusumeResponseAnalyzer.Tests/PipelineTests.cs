@@ -19,7 +19,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public void PacketCorpus_ParsesCurrentDebugPacketFileName()
+        public void PacketCorpus_ParsesLegacyFullUrlDebugPacketFileName()
         {
             var canonicalUrl = "https://example.test/umamusume/account/index?viewer_id=1#fragment";
             var path = Path.Combine(
@@ -31,6 +31,20 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.True(parsed);
             Assert.Equal(AnalyzerKind.Response, kind);
             Assert.Equal(canonicalUrl, url);
+        }
+
+        [Fact]
+        public void PacketCorpus_ParsesCurrentEndpointDebugPacketFileName()
+        {
+            var path = Path.Combine(
+                Path.GetTempPath(),
+                "26-06-30 12-00-00-000R-umamusume-single_mode_ramen-check_event.msgpack");
+
+            var parsed = PacketCorpus.TryGetCanonicalUrl(path, out var kind, out var url);
+
+            Assert.True(parsed);
+            Assert.Equal(AnalyzerKind.Response, kind);
+            Assert.Equal("/umamusume/single_mode_ramen/check_event", url);
         }
 
         [Theory]

@@ -182,20 +182,28 @@ namespace UmamusumeResponseAnalyzer.Tests
             if (requestMarker >= 0 && (responseMarker < 0 || requestMarker < responseMarker))
             {
                 kind = AnalyzerKind.Request;
-                canonicalUrl = Uri.UnescapeDataString(stem[(requestMarker + 2)..]);
+                canonicalUrl = ParseCanonicalUrlSuffix(stem[(requestMarker + 2)..]);
                 return canonicalUrl.Length > 0;
             }
 
             if (responseMarker >= 0)
             {
                 kind = AnalyzerKind.Response;
-                canonicalUrl = Uri.UnescapeDataString(stem[(responseMarker + 2)..]);
+                canonicalUrl = ParseCanonicalUrlSuffix(stem[(responseMarker + 2)..]);
                 return canonicalUrl.Length > 0;
             }
 
             canonicalUrl = string.Empty;
             kind = default;
             return false;
+        }
+
+        static string ParseCanonicalUrlSuffix(string suffix)
+        {
+            if (suffix.Contains("%", StringComparison.Ordinal) || suffix.Contains("://", StringComparison.Ordinal))
+                return Uri.UnescapeDataString(suffix);
+
+            return "/" + suffix.Replace('-', '/');
         }
     }
 }

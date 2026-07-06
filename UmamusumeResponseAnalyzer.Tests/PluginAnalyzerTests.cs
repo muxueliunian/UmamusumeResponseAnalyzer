@@ -21,6 +21,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         const string AccountIndexAbsoluteUrlWithoutPrefix = "https://l18-prod-all-gs-uma.komoejoy.com/account/index?viewer_id=1#fragment";
         const string AccountIndexUrlWithQuery = AccountIndexPath + "?viewer_id=1";
         const string LegendLoadAbsoluteUrlWithoutPrefix = "https://l18-prod-all-gs-uma.komoejoy.com/single_mode_legend/load";
+        const string RamenCheckEventAbsoluteUrl = "https://api.games.umamusume.jp/umamusume/single_mode_ramen/check_event";
         static GameHttpHeaders TestHeaders => new(
             "sid-1",
             "app-2026.07.03",
@@ -292,7 +293,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public async Task DispatchResponse_DebugFilesKeepMsgpackRawAndPutCanonicalUrlInMetadata()
+        public async Task DispatchResponse_DebugFilesKeepMsgpackRawAndUseEndpointFileName()
         {
             var previous = Config.Misc.SaveResponseForDebug;
             var originalCwd = Directory.GetCurrentDirectory();
@@ -303,18 +304,29 @@ namespace UmamusumeResponseAnalyzer.Tests
 
             try
             {
-                var canonicalUrl = AccountIndexAbsoluteUrl;
+                var canonicalUrl = RamenCheckEventAbsoluteUrl;
                 byte[] payload = [0xC0];
 
                 await Server.DispatchResponse(canonicalUrl, payload);
 
                 var packetsDir = Path.Combine(tempDir, "packets");
                 var msgpack = Assert.Single(Directory.GetFiles(packetsDir, "*.msgpack"));
-                Assert.Contains(Uri.EscapeDataString(canonicalUrl), Path.GetFileName(msgpack), StringComparison.Ordinal);
+                var msgpackName = Path.GetFileName(msgpack);
+                Assert.Matches(@"^\d{2}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}-\d{3}R-umamusume-single_mode_ramen-check_event\.msgpack$", msgpackName);
+                Assert.DoesNotContain("https", msgpackName, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("api.games.umamusume.jp", msgpackName, StringComparison.Ordinal);
+                Assert.DoesNotContain("%2F", msgpackName, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain(Path.DirectorySeparatorChar.ToString(), msgpackName, StringComparison.Ordinal);
+                Assert.DoesNotContain(Path.AltDirectorySeparatorChar.ToString(), msgpackName, StringComparison.Ordinal);
                 Assert.Equal(payload, File.ReadAllBytes(msgpack));
 
 #if DEBUG
                 var jsonPath = Assert.Single(Directory.GetFiles(packetsDir, "*.json"));
+                var jsonName = Path.GetFileName(jsonPath);
+                Assert.Matches(@"^\d{2}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}-\d{3}R\.json$", jsonName);
+                Assert.DoesNotContain("umamusume", jsonName, StringComparison.Ordinal);
+                Assert.DoesNotContain("https", jsonName, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("api.games.umamusume.jp", jsonName, StringComparison.Ordinal);
                 var debugJson = JObject.Parse(File.ReadAllText(jsonPath));
                 Assert.Equal(canonicalUrl, (string?)debugJson["url"]);
                 Assert.Equal(JTokenType.Null, debugJson["payload"]!.Type);
@@ -322,6 +334,40 @@ namespace UmamusumeResponseAnalyzer.Tests
             }
             finally
             {
+                Config.Misc.SaveResponseForDebug = previous;
+                Directory.SetCurrentDirectory(originalCwd);
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task DispatchResponse_DebugCleanupSkipsOldFilesThatCannotBeDeleted()
+        {
+            var previous = Config.Misc.SaveResponseForDebug;
+            var originalCwd = Directory.GetCurrentDirectory();
+            var tempDir = Path.Combine(Path.GetTempPath(), "ura-debug-packets-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            Directory.SetCurrentDirectory(tempDir);
+            Config.Misc.SaveResponseForDebug = true;
+            FileStream? lockedOldPacket = null;
+
+            try
+            {
+                var packetsDir = Path.Combine(tempDir, "packets");
+                Directory.CreateDirectory(packetsDir);
+                var oldPacket = Path.Combine(packetsDir, "26-07-05 16-19-10-526R-umamusume-single_mode_ramen-check_event.msgpack");
+                File.WriteAllBytes(oldPacket, [0xC0]);
+                File.SetCreationTime(oldPacket, DateTime.Now.AddDays(-2));
+                lockedOldPacket = new FileStream(oldPacket, FileMode.Open, FileAccess.Read, FileShare.None);
+
+                await Server.DispatchResponse(RamenCheckEventAbsoluteUrl, [0xC0]);
+
+                Assert.True(File.Exists(oldPacket));
+                Assert.Equal(2, Directory.GetFiles(packetsDir, "*.msgpack").Length);
+            }
+            finally
+            {
+                lockedOldPacket?.Dispose();
                 Config.Misc.SaveResponseForDebug = previous;
                 Directory.SetCurrentDirectory(originalCwd);
                 Directory.Delete(tempDir, recursive: true);
@@ -347,7 +393,7 @@ namespace UmamusumeResponseAnalyzer.Tests
 
                 var packetsDir = Path.Combine(tempDir, "packets");
                 var msgpack = Assert.Single(Directory.GetFiles(packetsDir, "*.msgpack"));
-                Assert.Contains(Uri.EscapeDataString(canonicalUrl), Path.GetFileName(msgpack), StringComparison.Ordinal);
+                Assert.Contains("unknown-path", Path.GetFileName(msgpack), StringComparison.Ordinal);
                 Assert.Equal(payload, File.ReadAllBytes(msgpack));
 
 #if DEBUG
